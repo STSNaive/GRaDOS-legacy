@@ -1,6 +1,6 @@
 {
   "name": "grados",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "MCP server for federated academic paper search and full-text extraction across Scopus, Web of Science, Springer, Crossref, PubMed, Sci-Hub, and Unpaywall.",
   "main": "dist/index.js",
   "bin": {
