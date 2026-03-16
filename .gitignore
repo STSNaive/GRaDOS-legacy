@@ -32,6 +32,6 @@ test-results.txt
 # Claude
 .claude/
 
-# MCPB (local-only build artifact)
+# MCPB (local-only)
 .mcpbignore
 *.mcpb
