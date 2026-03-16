@@ -1,0 +1,33 @@
+{
+  "name": "grados-mcp-server",
+  "version": "1.0.0",
+  "description": "An MCP server for federated academic paper search and full-text extraction, designed for phd-pro.",
+  "main": "dist/index.js",
+  "bin": {
+    "grados-mcp": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc --watch"
+  },
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.1",
+    "axios": "^1.13.6",
+    "cheerio": "^1.2.0",
+    "dotenv": "^16.4.5",
+    "form-data": "^4.0.5",
+    "pdf-parse": "^2.4.5",
+    "puppeteer-core": "^24.39.1"
+  },
+  "devDependencies": {
+    "@types/cheerio": "^0.22.35",
+    "@types/form-data": "^2.2.1",
+    "@types/node": "^20.12.7",
+    "@types/pdf-parse": "^1.1.5",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.5"
+  }
+}

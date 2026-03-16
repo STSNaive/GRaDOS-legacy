@@ -1,0 +1,1047 @@
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import axios from "axios";
+import * as dotenv from "dotenv";
+import * as fs from "fs";
+import * as path from "path";
+import * as cheerio from 'cheerio';
+import puppeteer from 'puppeteer-core';
+import FormData from 'form-data';
+import pdfParse from 'pdf-parse';
+import { spawn } from 'node:child_process';
+
+dotenv.config();
+
+// Apply a stealthy global User-Agent to evade basic 403 Forbidden blocks
+axios.defaults.headers.common['User-Agent'] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
+// Load Configuration
+let config: any = {};
+try {
+    const configPath = path.join(process.cwd(), "mcp-config.json");
+    if (fs.existsSync(configPath)) {
+        config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+    }
+} catch (e) {
+    console.error("Failed to load mcp-config.json. Falling back to default env variables.", e);
+}
+
+// Inject API keys from config into process.env (single config file as source of truth)
+if (config?.apiKeys) {
+    for (const [key, value] of Object.entries(config.apiKeys)) {
+        if (value && typeof value === 'string' && value.length > 0) {
+            process.env[key] = value;
+        }
+    }
+}
+
+// Warn if academic etiquette email is still the default placeholder
+if (!config.academicEtiquetteEmail || config.academicEtiquetteEmail === "admin@example.com") {
+    console.error("[GraDOS] WARNING: academicEtiquetteEmail is not configured. Crossref/Unpaywall may throttle requests. Set a real email in mcp-config.json.");
+}
+
+// Helpers to get API keys (Config file overrides .env)
+const getApiKey = (keyName: string) => config?.apiKeys?.[keyName] || process.env[keyName];
+
+// Initialize Server
+const server = new Server(
+    {
+        name: "GraDOS",
+        version: "1.0.0",
+    },
+    {
+        capabilities: {
+            tools: {},
+        },
+    }
+);
+
+// --- Types ---
+interface PaperMetadata {
+    title: string;
+    doi: string;
+    abstract?: string;
+    publisher?: string;
+    authors?: string[];
+    year?: string;
+    url?: string;
+    source: string;
+}
+
+// Mock Search Functions (Require API Keys)
+async function searchWebOfScience(query: string, limit: number): Promise<PaperMetadata[]> {
+    const apiKey = getApiKey("WOS_API_KEY");
+    if (!apiKey) return [];
+    try {
+        const response = await axios.get("https://api.clarivate.com/apis/wos-starter/v1/documents", {
+            params: { q: `TS=(${query})`, limit: limit },
+            headers: { "X-ApiKey": apiKey }
+        });
+        const hits = response.data?.hits || [];
+        return hits.map((hit: any) => ({
+            title: hit.title || "Unknown Title",
+            doi: hit.identifiers?.doi || "",
+            abstract: hit.abstract,
+            publisher: hit.source?.sourceTitle,
+            authors: hit.names?.authors ? hit.names.authors.map((a: any) => a.displayName) : [],
+            year: hit.source?.publishYear?.toString(),
+            url: hit.links?.record,
+            source: "Web of Science"
+        })).filter((p: PaperMetadata) => p.doi !== "");
+    } catch(e) { console.error("WoS search failed", e); return []; }
+}
+
+async function searchElsevier(query: string, limit: number): Promise<PaperMetadata[]> {
+    const apiKey = getApiKey("ELSEVIER_API_KEY");
+    if (!apiKey) return [];
+    try {
+        const response = await axios.get("https://api.elsevier.com/content/search/scopus", {
+            params: { query: query, count: Math.min(limit, 25), view: "COMPLETE" },
+            headers: { "X-ELS-APIKey": apiKey, "Accept": "application/json" }
+        });
+        const entries = response.data?.["search-results"]?.entry || [];
+        return entries.map((item: any) => ({
+            title: item["dc:title"] || "Unknown Title",
+            doi: item["prism:doi"],
+            abstract: item["dc:description"],
+            publisher: item["prism:publicationName"],
+            authors: item.author ? item.author.map((a: any) => a.authname) : [],
+            year: item["prism:coverDate"]?.split("-")?.[0],
+            url: item["prism:url"],
+            source: "Elsevier (Scopus)"
+        })).filter((p: PaperMetadata) => !!p.doi);
+    } catch(e) { console.error("Elsevier search failed", e); return []; }
+}
+
+async function searchSpringer(query: string, limit: number): Promise<PaperMetadata[]> {
+    const apiKey = getApiKey("SPRINGER_meta_API_KEY");
+    if (!apiKey) return [];
+    try {
+        const response = await axios.get("https://api.springernature.com/meta/v2/json", {
+            params: { q: query, p: limit, api_key: apiKey }
+        });
+        const records = response.data?.records || [];
+        return records.map((item: any) => ({
+            title: item.title || "Unknown Title",
+            doi: item.doi,
+            abstract: item.abstract,
+            publisher: item.publisher,
+            authors: item.creators ? item.creators.map((c: any) => c.creator) : [],
+            year: item.publicationDate?.split("-")?.[0],
+            url: item.url?.[0]?.value,
+            source: "Springer Nature"
+        })).filter((p: PaperMetadata) => !!p.doi);
+    } catch(e) { console.error("Springer search failed", e); return []; }
+}
+
+// Real Implementations (Open / Public APIs)
+async function searchCrossref(query: string, limit: number): Promise<PaperMetadata[]> {
+    try {
+        const etiquetteEmail = config.academicEtiquetteEmail || "admin@example.com";
+        const response = await axios.get("https://api.crossref.org/works", {
+            params: {
+                query: query,
+                rows: limit,
+                select: "DOI,title,abstract,publisher,author,published-print,URL"
+            },
+            headers: {
+                // Etiquette for Crossref API, but still maintaining stealth
+                "User-Agent": `GraDOS/1.0 (mailto:${etiquetteEmail}) Mozilla/5.0 Chrome/120.0.0.0` 
+            }
+        });
+
+        if (!response.data?.message?.items) return [];
+
+        return response.data.message.items.map((item: any) => ({
+            title: item.title?.[0] || "Unknown Title",
+            doi: item.DOI,
+            abstract: item.abstract ? item.abstract.replace(/(<([^>]+)>)/gi, "") : undefined, // Strip basic JATS XML tags if present
+            publisher: item.publisher,
+            authors: item.author?.map((a: any) => `${a.given} ${a.family}`),
+            year: item["published-print"]?.["date-parts"]?.[0]?.[0]?.toString(),
+            url: item.URL,
+            source: "Crossref"
+        }));
+    } catch (e) {
+        console.error("Crossref search failed", e);
+        return [];
+    }
+}
+
+async function searchPubMed(query: string, limit: number): Promise<PaperMetadata[]> {
+    try {
+        // 1. ESearch to get PubMed IDs (PMIDs)
+        const searchRes = await axios.get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi", {
+            params: {
+                db: "pubmed",
+                term: query,
+                retmode: "json",
+                retmax: limit
+            }
+        });
+        const pmids = searchRes.data?.esearchresult?.idlist;
+        if (!pmids || pmids.length === 0) return [];
+
+        // 2. ESummary to get metadata for those PMIDs
+        const summaryRes = await axios.get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi", {
+            params: {
+                db: "pubmed",
+                id: pmids.join(","),
+                retmode: "json"
+            }
+        });
+
+        // 3. EFetch (XML) to get abstracts (not available in ESummary)
+        const abstractMap = new Map<string, string>();
+        try {
+            const fetchRes = await axios.get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi", {
+                params: {
+                    db: "pubmed",
+                    id: pmids.join(","),
+                    rettype: "xml",
+                    retmode: "xml"
+                }
+            });
+            const xml: string = fetchRes.data;
+            const articleBlocks = xml.split(/<PubmedArticle>/g).slice(1);
+            for (const block of articleBlocks) {
+                const pmidMatch = block.match(/<PMID[^>]*>(\d+)<\/PMID>/);
+                // Handle both single and structured AbstractText elements
+                const abstractMatch = block.match(/<Abstract>([\s\S]*?)<\/Abstract>/);
+                if (pmidMatch && abstractMatch) {
+                    const rawAbstract = abstractMatch[1]
+                        .replace(/<\/?AbstractText[^>]*>/g, ' ')
+                        .replace(/<[^>]+>/g, '')
+                        .replace(/\s+/g, ' ')
+                        .trim();
+                    if (rawAbstract.length > 0) {
+                        abstractMap.set(pmidMatch[1], rawAbstract);
+                    }
+                }
+            }
+        } catch(e) {
+            console.error("PubMed EFetch for abstracts failed, continuing without abstracts.", e);
+        }
+
+        const results: PaperMetadata[] = [];
+        const resultDict = summaryRes.data?.result || {};
+
+        for (const pmid of pmids) {
+            const paper = resultDict[pmid];
+            if (!paper) continue;
+            let doi = "";
+            const articleIds = paper.articleids || [];
+            const doiObj = articleIds.find((idObj: any) => idObj.idtype === "doi");
+            if (doiObj) doi = doiObj.value;
+
+            if (doi) {
+                 results.push({
+                    title: paper.title,
+                    doi: doi,
+                    abstract: abstractMap.get(pmid),
+                    publisher: paper.fulljournalname,
+                    authors: paper.authors?.map((a: any) => a.name),
+                    year: paper.pubdate?.split(" ")?.[0],
+                    url: `https://pubmed.ncbi.nlm.nih.gov/${pmid}/`,
+                    source: "PubMed"
+                });
+            }
+        }
+        return results;
+    } catch (e) {
+        console.error("PubMed search failed", e);
+        return [];
+    }
+}
+
+// Tool Listing
+server.setRequestHandler(ListToolsRequestSchema, async () => {
+    return {
+        tools: [
+            {
+                name: "search_academic_papers",
+                description: "Searches multiple academic databases sequentially in priority order (Crossref, PubMed, WoS, Elsevier, Springer) for a given query and returns a deduplicated list of papers with metadata (DOIs, Abstracts).",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        query: {
+                            type: "string",
+                            description: "The search query (e.g., 'large language models in multi-agent reinforcement learning')."
+                        },
+                        limit: {
+                            type: "number",
+                            description: "Maximum number of results to return.",
+                            default: 10
+                        }
+                    },
+                    required: ["query"]
+                }
+            },
+            {
+                name: "extract_paper_full_text",
+                description: "Given a DOI, attempts to fetch the full text of the paper using a waterfall strategy. Returns markdown-formatted text. Includes QA validation to ensure it's not a paywall.",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        doi: {
+                            type: "string",
+                            description: "The Digital Object Identifier (DOI) of the paper."
+                        },
+                        publisher: {
+                            type: "string",
+                            description: "The publisher name, if known (e.g., 'Elsevier', 'Springer'), to optimize extraction strategy."
+                        },
+                        expected_title: {
+                            type: "string",
+                            description: "The title of the paper. Used for QA validation to ensure the extracted text matches the requested paper."
+                        }
+                    },
+                    required: ["doi"]
+                }
+            }
+        ]
+    };
+});
+
+// --- Helper: QA Validation ---
+function isValidPaperContent(text: string, doi: string, minCharacters: number = 1500, expectedTitle?: string): boolean {
+    if (!text || text.length < minCharacters) {
+        console.error(`QA: Text too short (${text?.length ?? 0} < ${minCharacters}) for DOI: ${doi}`);
+        return false;
+    }
+
+    // Check for Paywall / Error Anti-patterns
+    const antiPatterns = ["purchase full access", "log in to view", "access provided by", "institution access required", "403 forbidden"];
+    const lowerText = text.toLowerCase();
+    for (const phrase of antiPatterns) {
+        if (lowerText.includes(phrase)) {
+            console.error(`QA: Paywall pattern detected ("${phrase}") for DOI: ${doi}`);
+            return false;
+        }
+    }
+
+    // Check for Academic Structure
+    const structureRegex = /(abstract|introduction|methods|results|discussion|conclusion|references)/gi;
+    const matches = text.match(structureRegex);
+    if (!matches || matches.length < 2) {
+        console.error(`QA: Lacks academic structure (found ${matches?.length ?? 0} section headers) for DOI: ${doi}`);
+        return false;
+    }
+
+    // Verify title match if expected title is provided
+    if (expectedTitle && expectedTitle.length > 10) {
+        const normalizedExpected = expectedTitle.toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
+        const normalizedText = lowerText.replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ');
+        // Try full title first, then first 50 chars for partial match
+        if (!normalizedText.includes(normalizedExpected)) {
+            const shortTitle = normalizedExpected.substring(0, 50).trim();
+            if (!normalizedText.includes(shortTitle)) {
+                console.error(`QA: Title mismatch. Expected "${expectedTitle}" not found in extracted text for DOI: ${doi}`);
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+// --- Fetch Strategies (Phase 1) ---
+interface FetchResult {
+    source: string;
+    text?: string;       // If the API directly returns raw text/markdown
+    pdfBuffer?: Buffer;  // If the API returns a PDF
+}
+
+async function fetchFromElsevier(doi: string): Promise<FetchResult | null> {
+    const apiKey = getApiKey("ELSEVIER_API_KEY");
+    if (!apiKey) return null;
+    try {
+        console.error(`Attempting Elsevier TDM API for DOI: ${doi}...`);
+        // Try getting plain text first to skip PDF parsing
+        const res = await axios.get(`https://api.elsevier.com/content/article/doi/${doi}`, {
+            params: { httpAccept: "text/plain" },
+            headers: { "X-ELS-APIKey": apiKey }
+        });
+        
+        // text/plain returns a raw string; JSON returns a nested object
+        const rawText = typeof res.data === 'string'
+            ? res.data
+            : res.data?.["full-text-retrieval-response"]?.originalText;
+        if (rawText && typeof rawText === 'string' && rawText.length > 500) {
+             return { source: "Elsevier TDM", text: rawText };
+        }
+    } catch(e: any) {
+        console.error(`Elsevier TDM text/plain failed (${e.response?.status}). Checking permissions...`);
+    }
+    return null;
+}
+
+async function fetchFromSpringer(doi: string): Promise<FetchResult | null> {
+    const apiKey = getApiKey("SPRINGER_OA_API_KEY");
+    if (!apiKey) {
+        console.error("Springer OA API skipped: SPRINGER_OA_API_KEY not configured.");
+        return null;
+    }
+    try {
+        console.error(`Attempting Springer OA API for DOI: ${doi}...`);
+        // Springer OpenAccess API returns full text for OA articles
+        const res = await axios.get(`https://api.springernature.com/openaccess/json`, {
+            params: { q: `doi:${doi}`, api_key: apiKey }
+        });
+        const records = res.data?.records;
+        if (records && records.length > 0) {
+            const paragraphs = records[0].paragraphs;
+            if (paragraphs && Array.isArray(paragraphs)) {
+                // Combine paragraphs into markdown
+                const text = paragraphs.map((p: any) => p.text).join("\n\n");
+                return { source: "Springer OA API", text };
+            }
+        }
+    } catch(e: any) {
+        console.error(`Springer OA failed (${e.response?.status}).`);
+    }
+    return null;
+}
+
+// --- Fetch Strategies (Phase 2 & 3) ---
+
+async function fetchFromOA(doi: string): Promise<FetchResult | null> {
+    try {
+        console.error(`Attempting Open Access (Unpaywall) for DOI: ${doi}...`);
+        const etiquetteEmail = config.academicEtiquetteEmail || "admin@example.com";
+        const res = await axios.get(`https://api.unpaywall.org/v2/${doi}`, {
+            params: { email: etiquetteEmail }
+        });
+        const bestOaLocation = res.data?.best_oa_location;
+        if (bestOaLocation && bestOaLocation.url_for_pdf) {
+            console.error(`OA Found! Downloading PDF from: ${bestOaLocation.url_for_pdf}`);
+            const pdfRes = await axios.get(bestOaLocation.url_for_pdf, { responseType: 'arraybuffer' });
+            return { source: "Unpaywall OA", pdfBuffer: Buffer.from(pdfRes.data) };
+        }
+    } catch(e: any) {
+        console.error(`OA fetch failed (${e.response?.status || e.message}).`);
+    }
+    return null;
+}
+
+async function getWorkingSciHubMirror(configMirrorStore: string, fallback: string, autoUpdate: boolean): Promise<string> {
+    const mirrorFile = path.resolve(process.cwd(), configMirrorStore);
+    let mirrors = [fallback];
+    
+    try {
+        if (fs.existsSync(mirrorFile)) {
+             const content = fs.readFileSync(mirrorFile, 'utf-8');
+             const lines = content.split('\n').map(l => l.trim()).filter(l => l.startsWith("http"));
+             if (lines.length > 0) mirrors = lines;
+        } else {
+             fs.writeFileSync(mirrorFile, mirrors.join('\n'));
+        }
+    } catch(e) {
+        console.error("Could not read SciHub mirror file, using fallback.", e);
+    }
+    
+    // Test mirrors in order
+    for (const mirror of mirrors) {
+        try {
+            await axios.get(mirror, { timeout: 3000 });
+            
+            // If the first working mirror wasn't the top of the list, and autoUpdate is true, promote it
+            if (autoUpdate && mirrors[0] !== mirror) {
+                console.error(`Auto-updating mirror file to prioritize working mirror: ${mirror}`);
+                const newOrder = [mirror, ...mirrors.filter(m => m !== mirror)];
+                fs.writeFileSync(mirrorFile, newOrder.join('\n'));
+            }
+            return mirror;
+        } catch(e) {
+            console.error(`Sci-Hub mirror ${mirror} is unreachable.`);
+        }
+    }
+    
+    console.error(`All configured Sci-Hub mirrors failed. Returning fallback.`);
+    return fallback; 
+}
+
+async function fetchFromSciHub(doi: string, extractConfig: any): Promise<FetchResult | null> {
+    try {
+        const mirrorUrl = extractConfig?.sciHub?.fallbackMirror || "https://sci-hub.ru";
+        const mirrorFile = extractConfig?.sciHub?.mirrorUrlFile || "./scihub-mirrors.txt";
+        const autoUpdate = extractConfig?.sciHub?.autoUpdateMirror !== false;
+        
+        const activeMirror = await getWorkingSciHubMirror(mirrorFile, mirrorUrl, autoUpdate);
+        console.error(`Attempting Sci-Hub via mirror: ${activeMirror} for DOI: ${doi}...`);
+        
+        const res = await axios.get(`${activeMirror}/${doi}`, {
+            headers: {
+                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+        });
+        
+        // Scrape the PDF iframe link using cheerio
+        const html = res.data;
+        const $ = cheerio.load(html);
+        
+        let pdfUrl = '';
+        const embedSrc = $('embed[type="application/pdf"]').attr('src');
+        const iframeSrc = $('iframe').attr('src');
+        const buttonOnclick = $('button').attr('onclick');
+
+        if (embedSrc) {
+            pdfUrl = embedSrc;
+        } else if (iframeSrc) {
+            pdfUrl = iframeSrc;
+        } else if (buttonOnclick) {
+            // E.g. onclick="location.href='//domain/path/file.pdf?download=true'"
+            const match = buttonOnclick.match(/location\.href\s*=\s*['"](.*?)['"]/i);
+            if (match && match[1]) {
+                pdfUrl = match[1];
+            }
+        }
+        
+        if (pdfUrl) {
+            if (pdfUrl.startsWith('//')) {
+                pdfUrl = 'https:' + pdfUrl;
+            } else if (pdfUrl.startsWith('/')) {
+                pdfUrl = activeMirror + pdfUrl;
+            }
+            
+            console.error(`Sci-Hub bypassed paywall! Downloading PDF from inner link: ${pdfUrl}`);
+            const pdfRes = await axios.get(pdfUrl, { responseType: 'arraybuffer' });
+            return { source: "Sci-Hub", pdfBuffer: Buffer.from(pdfRes.data) };
+        } else {
+             console.error(`Sci-Hub fetched page but couldn't find a PDF embed or link.`);
+        }
+    } catch(e: any) {
+        console.error(`Sci-Hub fetch failed (${e.message}).`);
+    }
+    return null;
+}
+
+// --- Fetch Strategy (Phase 4: Headless Browser Fallback) ---
+async function fetchFromHeadlessBrowser(doi: string, extractConfig: any): Promise<FetchResult | null> {
+    const headlessConf = extractConfig?.headlessBrowser || {};
+    const browserStr = headlessConf.browser || "msedge";
+    const interactiveCaptchaHelp = headlessConf.interactiveCaptchaHelp !== false;
+    
+    let executablePath = "";
+    if (browserStr === "msedge") {
+        executablePath = "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe";
+    } else if (browserStr === "chrome") {
+        executablePath = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
+    } else if (browserStr === "firefox") {
+        executablePath = "C:\\Program Files\\Mozilla Firefox\\firefox.exe";
+    }
+    
+    if (!fs.existsSync(executablePath)) {
+        console.error(`Configured browser ${browserStr} not found at ${executablePath}. Headless failed.`);
+        return null; 
+    }
+
+    try {
+        console.error(`Launching ${browserStr} Headless for DOI: ${doi}...`);
+        let pdfBuffer: Buffer | null = null;
+        
+        const launchAndAttempt = async (isHeadless: boolean): Promise<boolean> => {
+            const browser = await puppeteer.launch({ executablePath, headless: isHeadless, defaultViewport: null });
+            try {
+                const page = await browser.newPage();
+                let foundCaptcha = false;
+                
+                // 1. Setup Interceptor to catch any downloaded PDF
+                page.on('response', async (response) => {
+                    const contentType = response.headers()['content-type'];
+                    if (contentType && contentType.includes('application/pdf')) {
+                        try {
+                            pdfBuffer = await response.buffer();
+                            console.error(`   [Edge] Browser successfully intercepted PDF!`);
+                        } catch(e){}
+                    }
+                });
+
+                // 2. Try Publisher Page via DOI
+                await page.goto(`https://doi.org/${doi}`, { waitUntil: 'networkidle2', timeout: 30000 }).catch(()=>{});
+                
+                const pageTitle = (await page.title()).toLowerCase();
+                const pageHtml = await page.content();
+                const isCloudflare = pageTitle.includes("just a moment") || pageTitle.includes("attention required") || pageHtml.includes('cf-browser');
+                const isCaptcha = pageHtml.includes('captcha') || pageHtml.includes('recaptcha');
+                
+                if (isHeadless && (isCloudflare || isCaptcha)) {
+                    console.error("   [Edge] Anti-Bot / CAPTCHA detected in Headless mode!");
+                    await browser.close();
+                    return true; // Return true to request retry in visible mode
+                }
+
+                // 3. Try to click generic "Download PDF" buttons on publisher page
+                if (!pdfBuffer) {
+                    const link = await page.$('a[href*="pdf"], a[title*="PDF"], a[class*="pdf"]').catch(()=>null);
+                    if (link) {
+                        console.error("   [Edge] Clicking generic PDF link on publisher page...");
+                        await Promise.all([
+                            page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(()=>{}),
+                            link.click().catch(()=>{})
+                        ]);
+                    }
+                }
+                
+                // 4. Try SciHub inside the browser as a robust fallback
+                if (!pdfBuffer) {
+                    console.error("   [Edge] Publisher PDF not found. Falling back to Browser Sci-Hub...");
+                    const mirrorFile = extractConfig?.sciHub?.mirrorUrlFile || "./scihub-mirrors.txt";
+                    const activeMirror = await getWorkingSciHubMirror(mirrorFile, "https://sci-hub.ru", false);
+                    await page.goto(`${activeMirror}/${doi}`, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+                    
+                    const shHtml = await page.content();
+                    if (isHeadless && (shHtml.includes('cf-browser') || shHtml.includes('captcha'))) {
+                         console.error("   [Edge] Sci-Hub is also protected by Cloudflare!");
+                         await browser.close();
+                         return true; 
+                    }
+                    
+                    const iframeSrc = await page.$eval('iframe, embed[type="application/pdf"]', (el: any) => el.src).catch(() => null);
+                    if (iframeSrc) {
+                         const pdfUrl = iframeSrc.startsWith('//') ? 'https:' + iframeSrc : (iframeSrc.startsWith('/') ? activeMirror + iframeSrc : iframeSrc);
+                         // Navigate directly to the PDF URL to trigger response interception
+                         await page.goto(pdfUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{});
+                    }
+                }
+
+                if (!isHeadless && !pdfBuffer) {
+                    // Give user time to click the PDF themselves if we missed it
+                    console.error("   [Edge] Waiting 20 seconds for you to manually trigger the PDF download...");
+                    await new Promise(r => setTimeout(r, 20000));
+                }
+
+                await browser.close();
+                return false; 
+            } catch(e) {
+                try { await browser.close(); } catch(err){}
+                return false;
+            }
+        };
+        
+        let needsInteractive = await launchAndAttempt(true);
+        
+        if (needsInteractive && interactiveCaptchaHelp) {
+            console.error("\n=======================================================");
+            console.error(">>> CAPTCHA DETECTED! OPENING VISIBLE BROWSER WINDOW <<<");
+            console.error(">>> PLEASE COMPLETE VERIFICATION IN THE POPUP WINDOW <<<");
+            console.error(">>> IT WILL AUTOMATICALLY RESUME AFTER SOLVING...    <<<");
+            console.error("=======================================================\n");
+            await launchAndAttempt(false);
+        }
+
+        if (pdfBuffer) {
+            return { source: "Headless Browser (Edge)", pdfBuffer };
+        }
+    } catch(e: any) {
+        console.error(`Headless Browser Exception: ${e.message}`);
+    }
+    return null;
+}
+
+// --- Parsing Strategies (Phase 5) ---
+async function parseWithLlamaParse(pdfBuffer: Buffer, fileName: string): Promise<string | null> {
+    const apiKey = getApiKey("LLAMAPARSE_API_KEY");
+    if (!apiKey) {
+        console.error("LlamaParse skipped: LLAMAPARSE_API_KEY not configured.");
+        return null;
+    }
+
+    try {
+        console.error(`   [LlamaParse] Uploading ${fileName} for advanced parsing...`);
+        const formData = new FormData();
+        formData.append("file", pdfBuffer, { filename: fileName, contentType: "application/pdf" });
+
+        const uploadRes = await axios.post("https://api.cloud.llamaindex.ai/api/parsing/upload", formData, {
+            headers: {
+                ...formData.getHeaders(),
+                "Authorization": `Bearer ${apiKey}`,
+                "Accept": "application/json"
+            }
+        });
+
+        const jobId = uploadRes.data?.id;
+        if (!jobId) throw new Error("No job ID returned from upload.");
+
+        console.error(`   [LlamaParse] Job created (ID: ${jobId}). Polling for markdown result...`);
+        
+        // Poll for completion (up to 3 minutes: 36 * 5s)
+        for (let i = 0; i < 36; i++) {
+            await new Promise(r => setTimeout(r, 5000));
+            const statusRes = await axios.get(`https://api.cloud.llamaindex.ai/api/parsing/job/${jobId}`, {
+                headers: { "Authorization": `Bearer ${apiKey}` }
+            });
+            const status = statusRes.data?.status;
+            
+            if (status === "SUCCESS") {
+                console.error(`   [LlamaParse] Parsing SUCCESS! Downloading text...`);
+                const mdRes = await axios.get(`https://api.cloud.llamaindex.ai/api/parsing/job/${jobId}/result/markdown`, {
+                    headers: { "Authorization": `Bearer ${apiKey}` }
+                });
+                return mdRes.data?.markdown || null;
+            } else if (status === "ERROR" || status === "FAILED") {
+                throw new Error("LlamaParse job failed remotely.");
+            }
+        }
+        throw new Error("LlamaParse parsing timed out after 3 minutes.");
+    } catch(e: any) {
+        console.error(`   [LlamaParse] Error:`, e.response?.data || e.message);
+    }
+    return null;
+}
+
+async function parseWithMarker(pdfBuffer: Buffer, fileName: string, timeoutMs: number = 120000): Promise<string | null> {
+    try {
+        const workerDir = path.resolve(process.cwd(), "marker-worker");
+        const pythonExec = path.join(workerDir, ".venv", "Scripts", "python.exe");
+        const workerPy = path.join(workerDir, "worker.py");
+        if (!fs.existsSync(pythonExec) || !fs.existsSync(workerPy)) {
+            console.error(`   [Marker] Worker is not installed at ${workerDir}.`);
+            return null;
+        }
+
+        console.error(`   [Marker] Spawning local Marker worker for ${fileName}...`);
+
+        const requestJson = JSON.stringify({
+            fileName,
+            pdfBase64: pdfBuffer.toString("base64"),
+        });
+
+        const responseJson = await new Promise<string>((resolve, reject) => {
+            const child = spawn(pythonExec, [workerPy], {
+                cwd: workerDir,
+                stdio: ["pipe", "pipe", "pipe"],
+                windowsHide: true,
+            });
+
+            let stdout = "";
+            let stderr = "";
+            let timedOut = false;
+
+            const timer = setTimeout(() => {
+                timedOut = true;
+                child.kill();
+                reject(new Error(`Marker timed out after ${timeoutMs}ms.`));
+            }, timeoutMs);
+
+            child.stdout.setEncoding("utf8");
+            child.stderr.setEncoding("utf8");
+
+            child.stdout.on("data", (chunk: string) => {
+                stdout += chunk;
+            });
+
+            child.stderr.on("data", (chunk: string) => {
+                stderr += chunk;
+            });
+
+            child.on("error", (error) => {
+                clearTimeout(timer);
+                reject(error);
+            });
+
+            child.on("close", (code) => {
+                clearTimeout(timer);
+                if (timedOut) return;
+                if (code !== 0) {
+                    reject(new Error(stderr || `Marker worker exited with code ${code}.`));
+                    return;
+                }
+                resolve(stdout);
+            });
+
+            child.stdin.end(requestJson);
+        });
+
+        const response = JSON.parse(responseJson);
+        if (!response?.ok) {
+            throw new Error(response?.error || "Marker worker returned an unknown error.");
+        }
+        return response.markdown || null;
+    } catch(e: any) {
+        console.error(`   [Marker] Error:`, e.message);
+    }
+    return null;
+}
+
+async function parseWithNative(pdfBuffer: Buffer): Promise<string | null> {
+    try {
+        console.error(`   [Native] Parsing PDF with pure Node.js (pdf-parse)...`);
+        const parseFunc = (pdfParse as any).default || pdfParse;
+        const data = await parseFunc(pdfBuffer);
+        return data.text || null;
+    } catch(e: any) {
+        console.error(`   [Native] Error:`, e.message);
+    }
+    return null;
+}
+
+// Tool Execution
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const { name, arguments: args } = request.params;
+
+    if (name === "search_academic_papers") {
+        const query = String(args?.query || "");
+        const limit = Number(args?.limit || 10);
+
+        // DEFAULT CONFIG IF NOT SET
+        const searchOrder = config?.search?.order || ["Elsevier", "Springer", "WebOfScience", "PubMed", "Crossref"];
+        const searchEnabled = config?.search?.enabled || {
+             "Elsevier": true, "Springer": true, "WebOfScience": true, "Crossref": true, "PubMed": true
+        };
+
+        const serviceMap: { [key: string]: (q: string, l: number) => Promise<PaperMetadata[]> } = {
+            "WebOfScience": searchWebOfScience,
+            "Elsevier": searchElsevier,
+            "Springer": searchSpringer,
+            "Crossref": searchCrossref,
+            "PubMed": searchPubMed
+        };
+
+        // SEQUENTIAL SEARCH STRATEGY
+        let allPapers: PaperMetadata[] = [];
+        
+        for (const serviceName of searchOrder) {
+            // Check if service is enabled in config
+            if (searchEnabled[serviceName] === false) continue;
+            
+            const searchFunc = serviceMap[serviceName];
+            if (searchFunc) {
+                console.error(`Searching ${serviceName} sequentially...`); // stdio goes to stderr
+                try {
+                    const results = await searchFunc(query, limit);
+                    allPapers = allPapers.concat(results);
+                    
+                    // Optional Early Exit: If we found enough distinct papers, we can stop the sequence early
+                    if (allPapers.length >= limit * 2) { 
+                        // Stop if we have twice the limit to ensure good deduplication, optionally configure this.
+                        break; 
+                    }
+                } catch (err) {
+                    console.error(`Error searching ${serviceName}:`, err);
+                    // Continue to the next service in the sequence
+                }
+            }
+        }
+
+        // Deduplicate by DOI (case-insensitive)
+        const uniquePapersMap = new Map<string, PaperMetadata>();
+        for (const paper of allPapers) {
+             const lowerDoi = paper.doi.toLowerCase();
+             // Prefer entries that have an abstract if there's a collision
+             if (!uniquePapersMap.has(lowerDoi) || (!uniquePapersMap.get(lowerDoi)?.abstract && paper.abstract)) {
+                 uniquePapersMap.set(lowerDoi, paper);
+             }
+        }
+        
+        let finalResults = Array.from(uniquePapersMap.values());
+        
+        // Trim to limit
+        if (finalResults.length > limit) {
+             finalResults = finalResults.slice(0, limit);
+        }
+
+        // Format as Markdown for the LLM
+        let formattedString = `Found ${finalResults.length} unique papers for query: "${query}"\n\n`;
+        finalResults.forEach((p, index) => {
+            formattedString += `### ${index + 1}. ${p.title}\n`;
+            formattedString += `- **DOI:** ${p.doi}\n`;
+            formattedString += `- **Publisher/Source:** ${p.publisher || p.source}\n`;
+            if (p.authors && p.authors.length > 0) formattedString += `- **Authors:** ${p.authors.join(", ")}\n`;
+            if (p.year) formattedString += `- **Year:** ${p.year}\n`;
+            if (p.abstract) formattedString += `- **Abstract:** ${p.abstract}\n`;
+            formattedString += `\n`;
+        });
+
+        if (finalResults.length === 0) {
+             formattedString = `No academic papers found for query: "${query}". Please broaden your search terms.`;
+        }
+
+        return {
+            content: [
+                {
+                    type: "text",
+                    text: formattedString
+                }
+            ]
+        };
+    } else if (name === "extract_paper_full_text") {
+        const doi = String(args?.doi || "");
+        const publisher = String(args?.publisher || "").toLowerCase();
+        const expectedTitle = args?.expected_title ? String(args.expected_title) : undefined;
+        
+        const extractConfig = config?.extract || {};
+        const tdmOrder: string[] = extractConfig?.tdm?.order || ["Elsevier", "Springer"];
+        const tdmEnabled: { [key: string]: boolean } = extractConfig?.tdm?.enabled || { "Elsevier": true, "Springer": true };
+        const fetchStratOrder: string[] = extractConfig?.fetchStrategy?.order || ["TDM", "OA", "SciHub", "Headless"];
+        const fetchStratEnabled: { [key: string]: boolean } = extractConfig?.fetchStrategy?.enabled || { "TDM": true, "OA": true, "SciHub": true, "Headless": true };
+        
+        let finalExtractedText = "";
+        let successfulSource = "";
+        
+        // Define our waterfall strategies
+        const fetchStrategies: Array<{ name: string, run: () => Promise<FetchResult | null> }> = [];
+
+        // 1. TDM Layer
+        if (fetchStratEnabled["TDM"]) {
+            fetchStrategies.push({
+                name: "TDM",
+                run: async () => {
+                    for (const tdmName of tdmOrder) {
+                        if (tdmEnabled[tdmName] === false) continue;
+                        let res: FetchResult | null = null;
+                        if (tdmName === "Elsevier") res = await fetchFromElsevier(doi);
+                        if (tdmName === "Springer") res = await fetchFromSpringer(doi);
+                        
+                        if (res) return res; // Return the first successful TDM fetch
+                    }
+                    return null;
+                }
+            });
+        }
+
+        // 2. Open Access Aggregators
+        if (fetchStratEnabled["OA"]) {
+            fetchStrategies.push({
+                name: "OA Aggregators",
+                run: async () => await fetchFromOA(doi)
+            });
+        }
+
+        // 3. Sci-Hub
+        if (fetchStratEnabled["SciHub"]) {
+            fetchStrategies.push({
+                name: "SciHub",
+                run: async () => await fetchFromSciHub(doi, extractConfig)
+            });
+        }
+
+        // 4. Headless Browser Scrape
+        if (fetchStratEnabled["Headless"]) {
+            fetchStrategies.push({
+                name: "Headless Scraper",
+                run: async () => await fetchFromHeadlessBrowser(doi, extractConfig)
+            });
+        }
+
+        for (const strategy of fetchStrategies) {
+            console.error(`=> Executing Fetch Strategy: [${strategy.name}]`);
+            try {
+                const fetchRes = await strategy.run();
+                if (!fetchRes) continue;
+
+                let parsedMarkdown = "";
+
+                // Has the API already provided raw text natively?
+                if (fetchRes.text && fetchRes.text.length > 0) {
+                    console.error(`   [${strategy.name}] successfully procured native text! (Length: ${fetchRes.text.length})`);
+                    parsedMarkdown = fetchRes.text;
+                } 
+                // Or do we have a PDF Buffer that needs Progressive Parsing?
+                else if (fetchRes.pdfBuffer) {
+                    console.error(`   [${strategy.name}] procured PDF Buffer. Saving to disk...`);
+                    
+                    // Respect user configuration for download directory
+                    const downloadDir = extractConfig?.downloadDirectory ? path.resolve(process.cwd(), extractConfig.downloadDirectory) : path.join(process.cwd(), "downloads");
+                    if (!fs.existsSync(downloadDir)) fs.mkdirSync(downloadDir, { recursive: true });
+                    
+                    const safeDoi = doi.replace(/[^a-z0-9]/gi, '_');
+                    const pdfFilePath = path.join(downloadDir, `${safeDoi}.pdf`);
+                    fs.writeFileSync(pdfFilePath, fetchRes.pdfBuffer);
+                    console.error(`   💾 PDF saved successfully to: ${pdfFilePath}`);
+
+                    console.error(`   Executing Progressive Parsing...`);
+                    const parseOrder: string[] = extractConfig?.parsing?.order || ["LlamaParse", "Marker", "Native"];
+                    const parseEnabled: { [key: string]: boolean } = extractConfig?.parsing?.enabled || { "LlamaParse": true, "Marker": true, "Native": true };
+                    
+                    for (const parser of parseOrder) {
+                        if (parseEnabled[parser] === false) continue;
+                        
+                        // LlamaParse
+                        if (parser === "LlamaParse" && !parsedMarkdown) {
+                            const md = await parseWithLlamaParse(fetchRes.pdfBuffer, `${safeDoi}.pdf`);
+                            if (md) {
+                                console.error("   ✨ LlamaParse successfully converted PDF to Markdown.");
+                                parsedMarkdown = md;
+                                break;
+                            }
+                        }
+                        
+                        // Marker
+                        if (parser === "Marker" && !parsedMarkdown) {
+                            const markerTimeout = extractConfig?.parsing?.markerTimeout || 120000;
+                            const md = await parseWithMarker(fetchRes.pdfBuffer, `${safeDoi}.pdf`, markerTimeout);
+                            if (md) {
+                                console.error("   ✨ Marker successfully converted PDF to Markdown.");
+                                parsedMarkdown = md;
+                                break;
+                            }
+                        }
+
+                        // Native
+                        if (parser === "Native" && !parsedMarkdown) {
+                            const md = await parseWithNative(fetchRes.pdfBuffer);
+                            if (md) {
+                                console.error("   ✨ Native fallback successfully converted PDF to text.");
+                                parsedMarkdown = md;
+                                break;
+                            }
+                        }
+                    }
+                    
+                    if (!parsedMarkdown) {
+                         throw new Error(`All configured Parsers failed to extract text from the downloaded PDF for DOI: ${doi}`);
+                    }
+                }
+
+                // 3. Quality Assurance Validation (minCharacters is now the single source of truth)
+                const qaMin = extractConfig?.qa?.minCharacters || 1500;
+                if (isValidPaperContent(parsedMarkdown, doi, qaMin, expectedTitle)) {
+                    finalExtractedText = parsedMarkdown;
+                    successfulSource = fetchRes.source;
+                    console.error(`✅ QA Validation Passed! Length: ${parsedMarkdown.length}`);
+                    break; // Success! Exit the waterfall.
+                } else {
+                    console.error(`❌ QA Validation Failed for [${strategy.name}]. Discarding and trying next strategy.`);
+                }
+            } catch (e) {
+                console.error(`   [${strategy.name}] failed throwing Error:`, e);
+                continue;
+            }
+        }
+
+        if (!finalExtractedText) {
+             return {
+                 content: [{ type: "text", text: `Error: Failed to extract valid full text for DOI: ${doi} after exhausting all configured waterfall methods. The paywall might be too strong or the network is blocked.` }],
+                 isError: true
+             };
+        }
+
+        return {
+            content: [
+                {
+                    type: "text",
+                    text: `# Extracted Paper Full Text [Source: ${successfulSource}]
+## DOI: ${doi}
+
+${finalExtractedText}`
+                }
+            ]
+        };
+    }
+
+    return {
+        content: [{ type: "text", text: `Error: Unknown tool "${name}". Available tools: search_academic_papers, extract_paper_full_text.` }],
+        isError: true
+    };
+});
+
+// Start Server
+async function main() {
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+    console.error("GraDOS MCP Node.js server running on stdio");
+}
+
+main().catch(console.error);
