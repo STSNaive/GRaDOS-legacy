@@ -42,8 +42,9 @@ if (!config.academicEtiquetteEmail || config.academicEtiquetteEmail === "admin@e
     console.error("[GRaDOS] WARNING: academicEtiquetteEmail is not configured. Crossref/Unpaywall may throttle requests. Set a real email in mcp-config.json.");
 }
 
-// Helpers to get API keys (Config file overrides .env)
+// Helpers to get API keys (Config file overrides .env, which is the MCPB path)
 const getApiKey = (keyName: string) => config?.apiKeys?.[keyName] || process.env[keyName];
+const getEtiquetteEmail = () => config?.academicEtiquetteEmail || process.env.ACADEMIC_ETIQUETTE_EMAIL || "admin@example.com";
 
 // Initialize Server
 const server = new Server(
@@ -139,7 +140,7 @@ async function searchSpringer(query: string, limit: number): Promise<PaperMetada
 // Real Implementations (Open / Public APIs)
 async function searchCrossref(query: string, limit: number): Promise<PaperMetadata[]> {
     try {
-        const etiquetteEmail = config.academicEtiquetteEmail || "admin@example.com";
+        const etiquetteEmail = getEtiquetteEmail();
         const response = await axios.get("https://api.crossref.org/works", {
             params: {
                 query: query,
@@ -410,7 +411,7 @@ async function fetchFromSpringer(doi: string): Promise<FetchResult | null> {
 async function fetchFromOA(doi: string): Promise<FetchResult | null> {
     try {
         console.error(`Attempting Open Access (Unpaywall) for DOI: ${doi}...`);
-        const etiquetteEmail = config.academicEtiquetteEmail || "admin@example.com";
+        const etiquetteEmail = getEtiquetteEmail();
         const res = await axios.get(`https://api.unpaywall.org/v2/${doi}`, {
             params: { email: etiquetteEmail }
         });

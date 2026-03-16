@@ -1,0 +1,112 @@
+{
+  "manifest_version": "0.3",
+  "name": "grados",
+  "display_name": "GRaDOS - Academic Paper Search & Extraction",
+  "version": "0.1.0",
+  "description": "MCP server for federated academic paper search and full-text extraction across Scopus, Web of Science, Springer, Crossref, PubMed, Sci-Hub, and Unpaywall.",
+  "long_description": "GRaDOS (Graduate Research and Document Operating System) gives AI agents the ability to search academic databases, download full-text papers through paywalls, and synthesize citation-grounded answers. It implements a waterfall extraction strategy (TDM API -> Open Access -> Sci-Hub -> Headless Browser) with progressive PDF parsing (LlamaParse -> Marker -> pdf-parse) and QA validation. Designed for campus network environments where institutional access provides database permissions. No API keys are strictly required - Crossref, PubMed, and Sci-Hub work with zero configuration.",
+  "author": {
+    "name": "STSNaive",
+    "url": "https://github.com/STSNaive"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/STSNaive/GRaDOS.git"
+  },
+  "support": "https://github.com/STSNaive/GRaDOS/issues",
+  "server": {
+    "type": "node",
+    "entry_point": "dist/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/dist/index.js"],
+      "env": {
+        "ELSEVIER_API_KEY": "${user_config.elsevier_api_key}",
+        "WOS_API_KEY": "${user_config.wos_api_key}",
+        "SPRINGER_meta_API_KEY": "${user_config.springer_meta_api_key}",
+        "SPRINGER_OA_API_KEY": "${user_config.springer_oa_api_key}",
+        "LLAMAPARSE_API_KEY": "${user_config.llamaparse_api_key}",
+        "ACADEMIC_ETIQUETTE_EMAIL": "${user_config.academic_email}"
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "search_academic_papers",
+      "description": "Search multiple academic databases (Crossref, PubMed, Scopus, Web of Science, Springer) and return a deduplicated list of papers with metadata and abstracts."
+    },
+    {
+      "name": "extract_paper_full_text",
+      "description": "Extract full text of a paper given its DOI using a waterfall strategy (TDM API -> Open Access -> Sci-Hub -> Browser). Returns Markdown with QA validation."
+    }
+  ],
+  "keywords": [
+    "academic",
+    "papers",
+    "research",
+    "literature-review",
+    "scopus",
+    "pubmed",
+    "crossref",
+    "web-of-science",
+    "springer",
+    "sci-hub",
+    "pdf",
+    "full-text"
+  ],
+  "license": "MIT",
+  "user_config": {
+    "elsevier_api_key": {
+      "type": "string",
+      "title": "Elsevier API Key",
+      "description": "API key from dev.elsevier.com (free with institutional access). Optional.",
+      "sensitive": true,
+      "required": false
+    },
+    "wos_api_key": {
+      "type": "string",
+      "title": "Web of Science API Key",
+      "description": "API key from developer.clarivate.com (free starter tier). Optional.",
+      "sensitive": true,
+      "required": false
+    },
+    "springer_meta_api_key": {
+      "type": "string",
+      "title": "Springer Nature Meta API Key",
+      "description": "API key from dev.springernature.com (free). Optional.",
+      "sensitive": true,
+      "required": false
+    },
+    "springer_oa_api_key": {
+      "type": "string",
+      "title": "Springer Nature OpenAccess API Key",
+      "description": "API key from dev.springernature.com for full-text OA retrieval. Optional.",
+      "sensitive": true,
+      "required": false
+    },
+    "llamaparse_api_key": {
+      "type": "string",
+      "title": "LlamaParse API Key",
+      "description": "API key from cloud.llamaindex.ai for high-quality PDF parsing (free tier). Optional.",
+      "sensitive": true,
+      "required": false
+    },
+    "academic_email": {
+      "type": "string",
+      "title": "Academic Email",
+      "description": "Your institutional email for Crossref/Unpaywall polite API access. Recommended.",
+      "default": "",
+      "required": false
+    }
+  },
+  "compatibility": {
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": {
+      "node": ">=18.0.0"
+    }
+  },
+  "privacy_policies": [
+    "https://dev.elsevier.com/policy.html",
+    "https://www.springernature.com/gp/info/privacy-policy"
+  ]
+}
