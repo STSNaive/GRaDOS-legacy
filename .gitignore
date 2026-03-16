@@ -1,34 +1,29 @@
-# Dependencies
+# Dependencies & build
 node_modules/
 dist/
 
-# Environment & secrets
+# Secrets & user config
 .env
 mcp-config.json
 
-# Marker worker
+# Marker worker runtime
 marker-worker/.venv/
 marker-worker/.cache/
 marker-worker/__pycache__/
+marker-worker/.tools/
 marker-worker/local.env
 marker-worker/smoke.pdf
+marker-worker/uv.lock
 
-# Downloads
+# Runtime artifacts
 downloads/
-
-# Local tools
-.tools/
-
-# Sci-Hub mirrors (auto-updated at runtime)
 scihub-mirrors.txt
-
-# Build/debug/test output
 node-out.txt
 temp_*.html
 test-results.txt
 
-# Lock files (large, auto-generated)
-marker-worker/uv.lock
+# Local tools
+.tools/
 
 # IDE
 .vscode/
@@ -36,3 +31,7 @@ marker-worker/uv.lock
 
 # Claude
 .claude/
+
+# MCPB (local-only build artifact)
+.mcpbignore
+*.mcpb
