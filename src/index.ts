@@ -9,7 +9,7 @@ import * as path from "path";
 import * as cheerio from 'cheerio';
 import puppeteer from 'puppeteer-core';
 import FormData from 'form-data';
-import pdfParse from 'pdf-parse';
+import { PDFParse } from 'pdf-parse';
 import { spawn } from 'node:child_process';
 
 dotenv.config();
@@ -121,7 +121,7 @@ async function searchSpringer(query: string, limit: number): Promise<PaperMetada
     if (!apiKey) return [];
     try {
         const response = await axios.get("https://api.springernature.com/meta/v2/json", {
-            params: { q: query, p: limit, api_key: apiKey }
+            params: { q: `keyword:"${query}"`, p: limit, api_key: apiKey }
         });
         const records = response.data?.records || [];
         return records.map((item: any) => ({
@@ -463,11 +463,25 @@ async function fetchFromOA(doi: string): Promise<FetchResult | null> {
         const res = await axios.get(`https://api.unpaywall.org/v2/${doi}`, {
             params: { email: etiquetteEmail }
         });
-        const bestOaLocation = res.data?.best_oa_location;
-        if (bestOaLocation && bestOaLocation.url_for_pdf) {
-            console.error(`OA Found! Downloading PDF from: ${bestOaLocation.url_for_pdf}`);
-            const pdfRes = await axios.get(bestOaLocation.url_for_pdf, { responseType: 'arraybuffer' });
-            return { source: "Unpaywall OA", pdfBuffer: Buffer.from(pdfRes.data) };
+        // Collect all OA locations with PDF URLs, prioritize repositories (arXiv, PMC) over publishers
+        const locations = (res.data?.oa_locations || [])
+            .filter((l: any) => l.url_for_pdf)
+            .sort((a: any, b: any) => {
+                if (a.host_type === 'repository' && b.host_type !== 'repository') return -1;
+                if (a.host_type !== 'repository' && b.host_type === 'repository') return 1;
+                return 0;
+            });
+        for (const loc of locations) {
+            try {
+                console.error(`OA: Trying ${loc.host_type} PDF: ${loc.url_for_pdf}`);
+                const pdfRes = await axios.get(loc.url_for_pdf, { responseType: 'arraybuffer', timeout: 30000 });
+                return { source: "Unpaywall OA", pdfBuffer: Buffer.from(pdfRes.data) };
+            } catch (dlErr: any) {
+                console.error(`OA: Failed (${dlErr.response?.status || dlErr.message}), trying next location...`);
+            }
+        }
+        if (locations.length === 0) {
+            console.error(`OA: No PDF URLs found for DOI: ${doi}`);
         }
     } catch(e: any) {
         console.error(`OA fetch failed (${e.response?.status || e.message}).`);
@@ -816,13 +830,16 @@ async function parseWithMarker(pdfBuffer: Buffer, fileName: string, timeoutMs: n
 }
 
 async function parseWithNative(pdfBuffer: Buffer): Promise<string | null> {
+    let parser: InstanceType<typeof PDFParse> | null = null;
     try {
-        console.error(`   [Native] Parsing PDF with pure Node.js (pdf-parse)...`);
-        const parseFunc = (pdfParse as any).default || pdfParse;
-        const data = await parseFunc(pdfBuffer);
-        return data.text || null;
+        console.error(`   [Native] Parsing PDF with pdf-parse v2...`);
+        parser = new PDFParse({ data: new Uint8Array(pdfBuffer) });
+        const result = await parser.getText();
+        return result.text || null;
     } catch(e: any) {
         console.error(`   [Native] Error:`, e.message);
+    } finally {
+        if (parser) await parser.destroy().catch(() => {});
     }
     return null;
 }
@@ -1069,6 +1086,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 } 
                 // Or do we have a PDF Buffer that needs Progressive Parsing?
                 else if (fetchRes.pdfBuffer) {
+                    // Validate that the buffer is actually a PDF (starts with %PDF magic bytes)
+                    const header = fetchRes.pdfBuffer.subarray(0, 5).toString('ascii');
+                    if (!header.startsWith('%PDF')) {
+                        console.error(`   [${strategy.name}] Downloaded content is not a valid PDF (header: "${header.replace(/[^\x20-\x7E]/g, '?')}"). Skipping.`);
+                        continue;
+                    }
                     console.error(`   [${strategy.name}] procured PDF Buffer. Saving to disk...`);
                     
                     // PDF files are saved to downloadDirectory (archival only, not indexed by RAG)

@@ -102,7 +102,11 @@ cwd = "/path/to/directory/containing/mcp-config.json"
 
 ### Optional: Install Marker (high-quality local PDF parsing)
 
-Marker uses deep learning models to convert PDFs to Markdown with much better accuracy than the built-in parser. Requires Python 3.12.
+Marker uses deep learning models to convert PDFs to Markdown with much better accuracy than the built-in parser (pdf-parse). It is the recommended parser for production use.
+
+**Prerequisites:** Python 3.12 (required by `marker-pdf`). Optional: NVIDIA GPU + CUDA for significant speedup.
+
+**Install:**
 
 ```powershell
 cd marker-worker
@@ -110,6 +114,88 @@ cd marker-worker
 .\install.ps1 -Torch cuda  # Force GPU (CUDA)
 .\install.ps1 -Torch cpu   # Force CPU
 ```
+
+The install script will:
+1. Set up a Python 3.12 virtual environment (via `uv`)
+2. Install `marker-pdf==1.10.2` and PyTorch
+3. Download model weights and fonts to `marker-worker/.cache/` (first run only, ~1 GB)
+
+**Enable in config:** After installation, update `mcp-config.json` to enable Marker:
+
+```json
+{
+  "extract": {
+    "parsing": {
+      "markerTimeout": 120000,
+      "order": ["Marker", "Native"],
+      "enabled": {
+        "LlamaParse": false,
+        "Marker": true,
+        "Native": true
+      }
+    }
+  }
+}
+```
+
+Marker is part of the progressive parsing waterfall: if it fails or times out, GRaDOS automatically falls back to `Native` (pdf-parse). The `markerTimeout` setting (milliseconds) controls how long to wait before falling back (default: 120 seconds).
+
+**Verify:** Run the smoke test to confirm Marker is working:
+
+```bash
+node tests/mcp-smoke.mjs
+```
+
+If Marker is active, the log will show:
+```
+[Marker] Converting PDF with local Marker worker...
+✨ Marker successfully converted PDF to Markdown.
+```
+
+### Integrated Paper Knowledge Base
+
+GRaDOS builds a local paper knowledge base by combining three components:
+
+```
+                        GRaDOS                              mcp-local-rag
+                          │                                      │
+    1. Fetch PDF ─────────┤                                      │
+    2. Parse to Markdown ─┤                                      │
+    3. QA Validation ─────┤                                      │
+                          │                                      │
+                          ▼                                      ▼
+                   ┌─────────────┐                    ┌──────────────────┐
+                   │ downloads/  │ (PDF, archival)    │ LanceDB vectors  │
+                   │ papers/     │ ──── ingest ─────► │ all-MiniLM-L6-v2 │
+                   └─────────────┘ (Markdown, RAG)    └──────────────────┘
+```
+
+**Storage separation:** PDFs and Markdown are stored in separate directories to prevent duplicate indexing:
+
+| Directory | Content | Purpose | Configured by |
+|---|---|---|---|
+| `downloads/` | Raw `.pdf` files | Archival only, not indexed | `extract.downloadDirectory` |
+| `papers/` | Parsed `.md` files (with YAML front-matter) | Indexed by mcp-local-rag | `extract.papersDirectory` |
+
+Each Markdown file includes structured front-matter:
+
+```yaml
+---
+doi: "10.1038/s41598-025-29656-1"
+title: "Triple-negative complementary metamaterial..."
+source: "Unpaywall OA"
+fetched_at: "2026-03-17T12:00:00.000Z"
+---
+```
+
+**Database workflow:**
+
+1. **Extract** — GRaDOS downloads a PDF and parses it (Marker or pdf-parse), saves `.pdf` to `downloads/` and `.md` to `papers/`
+2. **Ingest** — The AI agent calls `ingest_file` (mcp-local-rag) on the new `.md` file, which embeds it into a local LanceDB vector store using `all-MiniLM-L6-v2` embeddings
+3. **Query** — On future questions, the SKILL.md protocol checks the local library first via `query_documents` (semantic + keyword search), avoiding redundant API calls and re-extraction
+4. **Manage** — Use `list_files` to see all indexed papers, `delete_file` to remove outdated entries
+
+> **Note:** mcp-local-rag does NOT auto-scan directories. Papers must be explicitly ingested via the `ingest_file` tool. The SKILL.md protocol handles this automatically at Step 3.
 
 ### Optional: Install mcp-local-rag (local paper library with RAG)
 
