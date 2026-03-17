@@ -53,11 +53,14 @@ After receiving search results, screen every paper for relevance:
    - If the paper was only marginally relevant, silently skip it.
 5. **Do NOT attempt to extract more than 5 papers** in a single query to conserve API quota and time.
 
-## Step 4: Information Synthesis & Citation
+## Step 4: Information Synthesis, Citation & Zotero
 
 1. Read all extracted full-text Markdown carefully — both from the local library (Step 0) and from remote extraction (Step 3).
 2. Synthesize an answer to the user's original question **in Chinese**.
 3. **Citation rule**: Every factual claim MUST include an inline citation, e.g. `[Smith et al., 2023]`. No unsupported claims allowed.
+4. After completing the synthesis, for each paper that was **actually cited** in the answer, call `save_paper_to_zotero` with its full metadata (title, DOI, authors, abstract, journal, year, url, tags). Pass the query topic as a tag so papers are organised by research theme.
+   - Only save papers that contributed to the final answer — do not save papers that were screened out or failed extraction.
+   - If `save_paper_to_zotero` returns an error (e.g. Zotero not configured), silently skip and continue.
 
 ## Step 5: Double-Check Protocol (CRITICAL)
 

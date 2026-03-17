@@ -32,6 +32,7 @@ SKILL.md (6-step academic protocol)
 |---|---|---|
 | GRaDOS | `search_academic_papers` | Waterfall search across Scopus, Web of Science, Springer, Crossref, PubMed. Deduplicates by DOI. |
 | GRaDOS | `extract_paper_full_text` | 4-stage fetch + 3-stage parse + QA validation. Returns Markdown. Auto-saves `.md` to papers directory. |
+| GRaDOS | `save_paper_to_zotero` | Saves cited paper metadata to Zotero web library via API. Called after synthesis for papers used in the answer. |
 | mcp-local-rag | `query_documents` | Semantic + keyword search over locally indexed papers. |
 | mcp-local-rag | `ingest_file` | Index a paper's Markdown file into the local RAG database. |
 | mcp-local-rag | `list_files` | List all indexed papers with status. |
@@ -167,6 +168,31 @@ GRaDOS extracts paper              mcp-local-rag indexes papers/
 - The AI agent calls `ingest_file` on each new `.md` file to index it into mcp-local-rag's vector database.
 - Next time, the SKILL.md protocol checks the local library first via `query_documents`, saving API calls and extraction time.
 
+### Optional: Zotero web library integration
+
+GRaDOS can automatically save cited papers to your [Zotero](https://www.zotero.org/) web library after each research session. No desktop client required — it uses the Zotero Web API directly.
+
+**Setup:**
+
+1. Get your **API key** at `https://www.zotero.org/settings/keys` → New Key → check "Write Access".
+2. Get your **library ID** (numeric user ID shown on the same page as "Your userID for use in API calls").
+3. Add both to `mcp-config.json`:
+
+```json
+{
+  "zotero": {
+    "libraryId": "1234567",
+    "libraryType": "user",
+    "defaultCollectionKey": ""
+  },
+  "apiKeys": {
+    "ZOTERO_API_KEY": "your-api-key-here"
+  }
+}
+```
+
+Papers are saved as `journalArticle` items with title, DOI, authors, abstract, journal, year, URL, and tags. The research query topic is automatically added as a tag to keep your library organised by theme.
+
 ## Configuration
 
 All configuration lives in a single file: `mcp-config.json`. Run `grados --init` to generate one from the template.
@@ -180,6 +206,7 @@ All configuration lives in a single file: `mcp-config.json`. Run `grados --init`
 | `SPRINGER_meta_API_KEY` | [Springer Nature API](https://dev.springernature.com/) | No | Yes |
 | `SPRINGER_OA_API_KEY` | Same as above (OpenAccess endpoint) | No | Yes |
 | `LLAMAPARSE_API_KEY` | [LlamaCloud](https://cloud.llamaindex.ai/) | No | Free tier |
+| `ZOTERO_API_KEY` | [Zotero Settings → Keys](https://www.zotero.org/settings/keys) | No | Free |
 
 Crossref and PubMed require no API keys. Sci-Hub and Unpaywall require no keys either.
 
