@@ -10,24 +10,31 @@ GRaDOS is an MCP server that gives AI agents (Claude, Codex, etc.) the ability t
 User Question
   |
   v
-SKILL.md (5-step academic protocol)
+SKILL.md (6-step academic protocol)
   |
+  ├─ Step 0: Check Local Paper Library (mcp-local-rag)
+  │    └─ Semantic + keyword search over previously downloaded papers
   ├─ Step 1: Query Decomposition
   ├─ Step 2: Relevance Screening (abstract / title filtering)
-  ├─ Step 3: Full-Text Extraction
+  ├─ Step 3: Full-Text Extraction & Indexing
   │    ├─ Waterfall Fetch: TDM API → Unpaywall OA → Sci-Hub → Headless Browser
   │    ├─ Progressive Parse: LlamaParse → Marker (local GPU) → pdf-parse
-  │    └─ QA Validation: length + paywall detection + structure + title match
+  │    ├─ QA Validation: length + paywall detection + structure + title match
+  │    ├─ PDF saved to downloads/  (archival)
+  │    └─ Markdown saved to papers/ (RAG-indexed by mcp-local-rag)
   ├─ Step 4: Synthesis & Citation (Chinese output)
   └─ Step 5: Double-Check Protocol (anti-hallucination)
 ```
 
 **MCP Tools exposed:**
 
-| Tool | Description |
-|---|---|
-| `search_academic_papers` | Waterfall search across Scopus, Web of Science, Springer, Crossref, PubMed. Deduplicates by DOI. |
-| `extract_paper_full_text` | 4-stage fetch + 3-stage parse + QA validation. Returns Markdown. |
+| Server | Tool | Description |
+|---|---|---|
+| GRaDOS | `search_academic_papers` | Waterfall search across Scopus, Web of Science, Springer, Crossref, PubMed. Deduplicates by DOI. |
+| GRaDOS | `extract_paper_full_text` | 4-stage fetch + 3-stage parse + QA validation. Returns Markdown. Auto-saves `.md` to papers directory. |
+| mcp-local-rag | `query_documents` | Semantic + keyword search over locally indexed papers. |
+| mcp-local-rag | `ingest_file` | Index a paper's Markdown file into the local RAG database. |
+| mcp-local-rag | `list_files` | List all indexed papers with status. |
 
 ## Installation
 
@@ -103,6 +110,63 @@ cd marker-worker
 .\install.ps1 -Torch cpu   # Force CPU
 ```
 
+### Optional: Install mcp-local-rag (local paper library with RAG)
+
+[mcp-local-rag](https://github.com/shinpr/mcp-local-rag) provides a local paper library with semantic search. GRaDOS automatically saves parsed Markdown files to a `papers/` directory that mcp-local-rag indexes and makes searchable. No Python required — it's pure Node.js, just like GRaDOS.
+
+**Register with your MCP client (one command):**
+
+```bash
+# Claude Code
+claude mcp add local-rag -- npx -y mcp-local-rag
+
+# Codex
+codex mcp add local-rag -- npx -y mcp-local-rag
+```
+
+Or configure manually (`.claude/settings.json`):
+
+```json
+{
+  "mcpServers": {
+    "grados": {
+      "command": "npx",
+      "args": ["-y", "grados"],
+      "cwd": "/path/to/project"
+    },
+    "local-rag": {
+      "command": "npx",
+      "args": ["-y", "mcp-local-rag"],
+      "env": {
+        "BASE_DIR": "/path/to/project/papers"
+      }
+    }
+  }
+}
+```
+
+> **Important:** `BASE_DIR` must point to the same directory as `extract.papersDirectory` in `mcp-config.json` (default: `./papers`).
+
+**How it works:**
+
+```
+GRaDOS extracts paper              mcp-local-rag indexes papers/
+         │                                   │
+         ▼                                   ▼
+  downloads/                           LanceDB vector store
+  └── 10_1234_xxxxx.pdf (archival)     ┌───────────────────┐
+                                       │ query_documents    │ ◄── AI Agent
+  papers/                              │ ingest_file        │
+  ├── 10_1234_xxxxx.md  ─────────────► │ list_files         │
+  └── 10_5678_yyyyy.md  ─────────────► │ delete_file        │
+                                       └───────────────────┘
+```
+
+- GRaDOS saves raw **PDFs** to `downloads/` (archival, not indexed).
+- GRaDOS saves parsed **Markdown** (with YAML front-matter: DOI, title, source) to `papers/`.
+- The AI agent calls `ingest_file` on each new `.md` file to index it into mcp-local-rag's vector database.
+- Next time, the SKILL.md protocol checks the local library first via `query_documents`, saving API calls and extraction time.
+
 ## Configuration
 
 All configuration lives in a single file: `mcp-config.json`. Run `grados --init` to generate one from the template.
@@ -147,9 +211,18 @@ The `extract.fetchStrategy.order` controls the full-text extraction priority:
 }
 ```
 
+### Storage Directories
+
+| Setting | Default | Description |
+|---|---|---|
+| `extract.downloadDirectory` | `./downloads` | Raw PDF files (archival, not indexed by RAG) |
+| `extract.papersDirectory` | `./papers` | Parsed Markdown files (indexed by mcp-local-rag) |
+
+mcp-local-rag's `BASE_DIR` environment variable must point to the same path as `extract.papersDirectory`.
+
 ## SKILL.md
 
-The `skills/GRaDOS/SKILL.md` file is a structured prompt that teaches the AI agent the 5-step research protocol. Copy it into your agent's skill/prompt directory to enable the full workflow.
+The `skills/GRaDOS/SKILL.md` file is a structured prompt that teaches the AI agent the 6-step research protocol (Step 0: local library check + Steps 1-5). Copy it into your agent's skill/prompt directory to enable the full workflow.
 
 ## License
 

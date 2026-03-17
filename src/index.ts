@@ -939,7 +939,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 else if (fetchRes.pdfBuffer) {
                     console.error(`   [${strategy.name}] procured PDF Buffer. Saving to disk...`);
                     
-                    // Respect user configuration for download directory
+                    // PDF files are saved to downloadDirectory (archival only, not indexed by RAG)
                     const downloadDir = extractConfig?.downloadDirectory ? path.resolve(process.cwd(), extractConfig.downloadDirectory) : path.join(process.cwd(), "downloads");
                     if (!fs.existsSync(downloadDir)) fs.mkdirSync(downloadDir, { recursive: true });
                     
@@ -998,6 +998,30 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                     finalExtractedText = parsedMarkdown;
                     successfulSource = fetchRes.source;
                     console.error(`✅ QA Validation Passed! Length: ${parsedMarkdown.length}`);
+
+                    // 4. Save parsed Markdown to papersDirectory for mcp-local-rag indexing
+                    //    Separate from downloadDirectory (PDF) to avoid duplicate RAG ingestion
+                    try {
+                        const papersDir = extractConfig?.papersDirectory ? path.resolve(process.cwd(), extractConfig.papersDirectory) : path.join(process.cwd(), "papers");
+                        if (!fs.existsSync(papersDir)) fs.mkdirSync(papersDir, { recursive: true });
+                        const safeDoi = doi.replace(/[^a-z0-9]/gi, '_');
+                        const mdFilePath = path.join(papersDir, `${safeDoi}.md`);
+                        // Prepend YAML front-matter with metadata for RAG enrichment
+                        const frontMatter = [
+                            '---',
+                            `doi: "${doi}"`,
+                            expectedTitle ? `title: "${expectedTitle.replace(/"/g, '\\"')}"` : '',
+                            `source: "${fetchRes.source}"`,
+                            `fetched_at: "${new Date().toISOString()}"`,
+                            '---',
+                            ''
+                        ].filter(Boolean).join('\n');
+                        fs.writeFileSync(mdFilePath, frontMatter + parsedMarkdown, 'utf-8');
+                        console.error(`📚 Saved Markdown for RAG indexing: ${mdFilePath}`);
+                    } catch (saveErr: any) {
+                        console.error(`⚠️ Failed to save Markdown (non-fatal): ${saveErr.message}`);
+                    }
+
                     break; // Success! Exit the waterfall.
                 } else {
                     console.error(`❌ QA Validation Failed for [${strategy.name}]. Discarding and trying next strategy.`);
