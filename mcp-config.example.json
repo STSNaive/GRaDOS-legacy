@@ -17,6 +17,9 @@
     },
     "extract": {
         "downloadDirectory": "./downloads",
+        "_comment_downloadDirectory": "Where raw PDF files are saved (archival only). NOT indexed by mcp-local-rag.",
+        "papersDirectory": "./papers",
+        "_comment_papersDirectory": "Where parsed Markdown (.md) files are saved. This is the BASE_DIR for mcp-local-rag. Agent uses ingest_file / query_documents on files here.",
         "fetchStrategy": {
             "order": ["TDM", "OA", "SciHub", "Headless"],
             "enabled": {
@@ -57,12 +60,27 @@
             "minCharacters": 1500
         }
     },
+    "localRag": {
+        "_comment": "Reference config for mcp-local-rag. Install: npx -y mcp-local-rag. Register: claude mcp add local-rag -- npx -y mcp-local-rag",
+        "baseDirShouldMatch": "./papers",
+        "_comment_baseDirShouldMatch": "Set mcp-local-rag's BASE_DIR env var to the same absolute path as extract.papersDirectory above."
+    },
+    "zotero": {
+        "_comment": "Zotero Web API settings. Get your API key at https://www.zotero.org/settings/keys and your library ID at https://www.zotero.org/settings/keys (shown as 'Your userID for use in API calls').",
+        "libraryId": "",
+        "_comment_libraryId": "Your Zotero numeric user ID (not username). Found at zotero.org/settings/keys.",
+        "libraryType": "user",
+        "_comment_libraryType": "'user' for personal library, 'group' for shared group library.",
+        "defaultCollectionKey": "",
+        "_comment_defaultCollectionKey": "Optional. Zotero collection key to file papers into by default. Leave empty to save to library root. Get a key from your Zotero library URL."
+    },
     "apiKeys": {
         "ELSEVIER_API_KEY": "",
         "WOS_API_KEY": "",
         "SPRINGER_meta_API_KEY": "",
         "SPRINGER_OA_API_KEY": "",
-        "LLAMAPARSE_API_KEY": ""
+        "LLAMAPARSE_API_KEY": "",
+        "ZOTERO_API_KEY": ""
     },
     "_comment_academicEtiquetteEmail": "Email used for academic APIs (Crossref, Unpaywall) to identify requests and get into their polite pools. CHANGE THIS to your real institutional email.",
     "academicEtiquetteEmail": "your-email@university.edu"

@@ -16,6 +16,7 @@ marker-worker/smoke.pdf
 marker-worker/uv.lock
 
 # Runtime artifacts
+papers/
 downloads/
 scihub-mirrors.txt
 node-out.txt

@@ -301,6 +301,54 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                     },
                     required: ["doi"]
                 }
+            },
+            {
+                name: "save_paper_to_zotero",
+                description: "Saves a paper's bibliographic metadata to the Zotero web library. Call this after synthesis for each paper that was cited in the final answer. Requires ZOTERO_API_KEY and zotero.libraryId in mcp-config.json.",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        doi: {
+                            type: "string",
+                            description: "The DOI of the paper."
+                        },
+                        title: {
+                            type: "string",
+                            description: "The full title of the paper."
+                        },
+                        authors: {
+                            type: "array",
+                            items: { type: "string" },
+                            description: "List of author names (e.g. ['Jane Smith', 'John Doe'])."
+                        },
+                        abstract: {
+                            type: "string",
+                            description: "The abstract of the paper."
+                        },
+                        journal: {
+                            type: "string",
+                            description: "Journal or publisher name."
+                        },
+                        year: {
+                            type: "string",
+                            description: "Publication year (e.g. '2023')."
+                        },
+                        url: {
+                            type: "string",
+                            description: "URL to the paper's landing page."
+                        },
+                        tags: {
+                            type: "array",
+                            items: { type: "string" },
+                            description: "Optional tags/keywords to attach to the Zotero item."
+                        },
+                        collection_key: {
+                            type: "string",
+                            description: "Optional Zotero collection key to file the item into. Overrides zotero.defaultCollectionKey from config."
+                        }
+                    },
+                    required: ["doi", "title"]
+                }
             }
         ]
     };
@@ -779,6 +827,90 @@ async function parseWithNative(pdfBuffer: Buffer): Promise<string | null> {
     return null;
 }
 
+// --- Zotero Web API Helper ---
+interface ZoteroCreator {
+    creatorType: string;
+    firstName: string;
+    lastName: string;
+}
+
+function parseAuthorName(fullName: string): ZoteroCreator {
+    const parts = fullName.trim().split(/\s+/);
+    if (parts.length === 1) {
+        return { creatorType: "author", firstName: "", lastName: parts[0] };
+    }
+    const lastName = parts[parts.length - 1];
+    const firstName = parts.slice(0, -1).join(" ");
+    return { creatorType: "author", firstName, lastName };
+}
+
+async function saveToZotero(params: {
+    doi: string;
+    title: string;
+    authors?: string[];
+    abstract?: string;
+    journal?: string;
+    year?: string;
+    url?: string;
+    tags?: string[];
+    collectionKey?: string;
+}): Promise<{ success: boolean; itemKey?: string; error?: string }> {
+    const apiKey = getApiKey("ZOTERO_API_KEY");
+    const libraryId = config?.zotero?.libraryId || process.env.ZOTERO_LIBRARY_ID;
+    const libraryType = config?.zotero?.libraryType || process.env.ZOTERO_LIBRARY_TYPE || "user";
+
+    if (!apiKey) return { success: false, error: "ZOTERO_API_KEY is not configured in mcp-config.json apiKeys." };
+    if (!libraryId) return { success: false, error: "zotero.libraryId is not configured in mcp-config.json." };
+
+    const collectionKey = params.collectionKey || config?.zotero?.defaultCollectionKey || undefined;
+
+    const creators: ZoteroCreator[] = (params.authors || []).map(parseAuthorName);
+
+    const item: Record<string, any> = {
+        itemType: "journalArticle",
+        title: params.title,
+        DOI: params.doi,
+        creators,
+    };
+    if (params.abstract) item.abstractNote = params.abstract;
+    if (params.journal)  item.publicationTitle = params.journal;
+    if (params.year)     item.date = params.year;
+    if (params.url)      item.url = params.url;
+    if (params.tags && params.tags.length > 0) {
+        item.tags = params.tags.map(t => ({ tag: t }));
+    }
+    if (collectionKey) item.collections = [collectionKey];
+
+    try {
+        const endpoint = `https://api.zotero.org/${libraryType}s/${libraryId}/items`;
+        const res = await axios.post(endpoint, [item], {
+            headers: {
+                "Zotero-API-Key": apiKey,
+                "Content-Type": "application/json",
+            }
+        });
+
+        // Zotero returns 200 with a "successful" map; key is "0" for first item
+        const successMap = res.data?.successful;
+        const itemKey = successMap?.["0"]?.key;
+        if (itemKey) {
+            console.error(`✅ Zotero: saved "${params.title}" → item key ${itemKey}`);
+            return { success: true, itemKey };
+        }
+
+        // Check for failures
+        const failed = res.data?.failed?.["0"];
+        if (failed) {
+            return { success: false, error: `Zotero API error: ${failed.message || JSON.stringify(failed)}` };
+        }
+
+        return { success: false, error: `Unexpected Zotero response: ${JSON.stringify(res.data)}` };
+    } catch (e: any) {
+        const msg = e.response?.data ? JSON.stringify(e.response.data) : e.message;
+        return { success: false, error: `Zotero API request failed: ${msg}` };
+    }
+}
+
 // Tool Execution
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
@@ -939,7 +1071,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 else if (fetchRes.pdfBuffer) {
                     console.error(`   [${strategy.name}] procured PDF Buffer. Saving to disk...`);
                     
-                    // Respect user configuration for download directory
+                    // PDF files are saved to downloadDirectory (archival only, not indexed by RAG)
                     const downloadDir = extractConfig?.downloadDirectory ? path.resolve(process.cwd(), extractConfig.downloadDirectory) : path.join(process.cwd(), "downloads");
                     if (!fs.existsSync(downloadDir)) fs.mkdirSync(downloadDir, { recursive: true });
                     
@@ -998,6 +1130,30 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                     finalExtractedText = parsedMarkdown;
                     successfulSource = fetchRes.source;
                     console.error(`✅ QA Validation Passed! Length: ${parsedMarkdown.length}`);
+
+                    // 4. Save parsed Markdown to papersDirectory for mcp-local-rag indexing
+                    //    Separate from downloadDirectory (PDF) to avoid duplicate RAG ingestion
+                    try {
+                        const papersDir = extractConfig?.papersDirectory ? path.resolve(process.cwd(), extractConfig.papersDirectory) : path.join(process.cwd(), "papers");
+                        if (!fs.existsSync(papersDir)) fs.mkdirSync(papersDir, { recursive: true });
+                        const safeDoi = doi.replace(/[^a-z0-9]/gi, '_');
+                        const mdFilePath = path.join(papersDir, `${safeDoi}.md`);
+                        // Prepend YAML front-matter with metadata for RAG enrichment
+                        const frontMatter = [
+                            '---',
+                            `doi: "${doi}"`,
+                            expectedTitle ? `title: "${expectedTitle.replace(/"/g, '\\"')}"` : '',
+                            `source: "${fetchRes.source}"`,
+                            `fetched_at: "${new Date().toISOString()}"`,
+                            '---',
+                            ''
+                        ].filter(Boolean).join('\n');
+                        fs.writeFileSync(mdFilePath, frontMatter + parsedMarkdown, 'utf-8');
+                        console.error(`📚 Saved Markdown for RAG indexing: ${mdFilePath}`);
+                    } catch (saveErr: any) {
+                        console.error(`⚠️ Failed to save Markdown (non-fatal): ${saveErr.message}`);
+                    }
+
                     break; // Success! Exit the waterfall.
                 } else {
                     console.error(`❌ QA Validation Failed for [${strategy.name}]. Discarding and trying next strategy.`);
@@ -1026,10 +1182,40 @@ ${finalExtractedText}`
                 }
             ]
         };
+    } else if (name === "save_paper_to_zotero") {
+        const doi     = String(args?.doi || "");
+        const title   = String(args?.title || "");
+        const authors = Array.isArray(args?.authors) ? args.authors.map(String) : [];
+        const abstract = args?.abstract ? String(args.abstract) : undefined;
+        const journal  = args?.journal  ? String(args.journal)  : undefined;
+        const year     = args?.year     ? String(args.year)     : undefined;
+        const url      = args?.url      ? String(args.url)      : undefined;
+        const tags     = Array.isArray(args?.tags) ? args.tags.map(String) : undefined;
+        const collectionKey = args?.collection_key ? String(args.collection_key) : undefined;
+
+        if (!doi || !title) {
+            return {
+                content: [{ type: "text", text: "Error: save_paper_to_zotero requires 'doi' and 'title'." }],
+                isError: true
+            };
+        }
+
+        const result = await saveToZotero({ doi, title, authors, abstract, journal, year, url, tags, collectionKey });
+
+        if (result.success) {
+            return {
+                content: [{ type: "text", text: `✅ Saved to Zotero: "${title}" (DOI: ${doi}) — item key: ${result.itemKey}` }]
+            };
+        } else {
+            return {
+                content: [{ type: "text", text: `❌ Failed to save to Zotero: ${result.error}` }],
+                isError: true
+            };
+        }
     }
 
     return {
-        content: [{ type: "text", text: `Error: Unknown tool "${name}". Available tools: search_academic_papers, extract_paper_full_text.` }],
+        content: [{ type: "text", text: `Error: Unknown tool "${name}". Available tools: search_academic_papers, extract_paper_full_text, save_paper_to_zotero.` }],
         isError: true
     };
 });
