@@ -2,7 +2,9 @@
 
 **Graduate Research and Document Operating System**
 
-GRaDOS is an MCP server that gives AI agents (Claude, Codex, etc.) the ability to search academic databases, download full-text papers through paywalls, and synthesize citation-grounded answers. It is designed for campus network environments where institutional access provides database permissions.
+The enrichment-grade MCP server for academic paper search and full-text extraction. For science.
+
+GRaDOS gives AI agents (Claude, Codex, etc.) the ability to search academic databases, download full-text papers through paywalls, and synthesize citation-grounded answers. It is designed for campus network environments where institutional access provides database permissions.
 
 ## Architecture
 

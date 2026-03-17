@@ -2,9 +2,9 @@
   "manifest_version": "0.3",
   "name": "grados",
   "display_name": "GRaDOS - Academic Paper Search & Extraction",
-  "version": "0.1.0",
-  "description": "MCP server for federated academic paper search and full-text extraction across Scopus, Web of Science, Springer, Crossref, PubMed, Sci-Hub, and Unpaywall.",
-  "long_description": "GRaDOS (Graduate Research and Document Operating System) gives AI agents the ability to search academic databases, download full-text papers through paywalls, and synthesize citation-grounded answers. It implements a waterfall extraction strategy (TDM API -> Open Access -> Sci-Hub -> Headless Browser) with progressive PDF parsing (LlamaParse -> Marker -> pdf-parse) and QA validation. Designed for campus network environments where institutional access provides database permissions. No API keys are strictly required - Crossref, PubMed, and Sci-Hub work with zero configuration.",
+  "version": "0.2.1",
+  "description": "The enrichment-grade MCP server for academic paper search and full-text extraction. For science.",
+  "long_description": "The enrichment-grade MCP server for academic paper search and full-text extraction. For science. GRaDOS gives AI agents the ability to search academic databases, download full-text papers through paywalls, and synthesize citation-grounded answers. It implements a waterfall extraction strategy (TDM API -> Open Access -> Sci-Hub -> Headless Browser) with progressive PDF parsing (LlamaParse -> Marker -> pdf-parse) and QA validation. Designed for campus network environments where institutional access provides database permissions. No API keys are strictly required - Crossref, PubMed, and Sci-Hub work with zero configuration.",
   "author": {
     "name": "STSNaive",
     "url": "https://github.com/STSNaive"
