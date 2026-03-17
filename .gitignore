@@ -23,6 +23,7 @@ scihub-mirrors.txt
 node-out.txt
 temp_*.html
 test-results.txt
+*.tgz
 
 # Local tools
 .tools/

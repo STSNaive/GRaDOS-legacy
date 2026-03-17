@@ -7,7 +7,7 @@
     "grados": "./dist/index.js"
   },
   "files": [
-    "dist/",
+    "dist/index.js",
     "mcp-config.example.json",
     "marker-worker/worker.py",
     "marker-worker/runtime_env.py",
