@@ -2,7 +2,25 @@
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
-**Graduate Research and Document Operating System**
+<table align="center">
+  <tr>
+    <td align="center">
+<pre style="display:inline-block; margin:0; font-family:'Bitstream Vera Sans Mono', 'SF Mono', Consolas, monospace; font-size:15px; line-height:1.02; font-weight:bold; white-space:pre; text-align:left;">
+  .oooooo.    ooooooooo.             oooooooooo.     .oooooo.    .oooooo..o
+ d8P'  `Y8b   `888   `Y88.           `888'   `Y8b   d8P'  `Y8b  d8P'    `Y8
+888            888   .d88'  .oooo.    888      888 888      888 Y88bo.
+888            888ooo88P'  `P  )88b   888      888 888      888  `"Y8888o.
+888     ooooo  888`88b.     .oP"888   888      888 888      888      `"Y88b
+`88.    .88'   888  `88b.  d8(  888   888     d88' `88b    d88' oo     .d8P
+ `Y8bood8P'   o888o  o888o `Y888""8o o888bood8P'    `Y8bood8P'  8""88888P'
+</pre>
+    </td>
+  </tr>
+</table>
+
+<p align="center">
+  <strong style="font-size:1.75rem;">Graduate Research and Document Operating System</strong>
+</p>
 
 面向学术检索与全文提取的 MCP 服务器，适合 Codex、Claude 等 AI agent 使用。
 
