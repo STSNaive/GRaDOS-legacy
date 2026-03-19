@@ -1330,7 +1330,9 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
                 tools: [
                     { name: "query_documents", purpose: "Semantic + keyword search over locally indexed papers" },
                     { name: "ingest_file", purpose: "Index a Markdown paper file into local RAG database" },
-                    { name: "list_files", purpose: "List all indexed papers with status" }
+                    { name: "list_files", purpose: "List all indexed papers with status" },
+                    { name: "delete_file", purpose: "Remove stale or unwanted entries from the local RAG index" },
+                    { name: "status", purpose: "Inspect local RAG database health and configuration warnings" }
                 ]
             },
             configPath: CONFIG_PATH,

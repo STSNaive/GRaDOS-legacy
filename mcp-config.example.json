@@ -61,7 +61,7 @@
         }
     },
     "localRag": {
-        "_comment": "Reference config for mcp-local-rag. Install: npx -y mcp-local-rag. Register: claude mcp add local-rag -- npx -y mcp-local-rag",
+        "_comment": "Reference config for mcp-local-rag. Current 0.10.x requires Node.js 20+. Install: npx -y mcp-local-rag. Register: claude mcp add local-rag -- npx -y mcp-local-rag",
         "baseDirShouldMatch": "./papers",
         "_comment_baseDirShouldMatch": "Set mcp-local-rag's BASE_DIR env var to the same absolute path as extract.papersDirectory above."
     },

@@ -30,6 +30,8 @@ All search queries MUST be in **English**. All answers to the user MUST be in **
 | `query_documents` | Semantic + keyword search over locally indexed papers. Returns relevant text chunks. |
 | `ingest_file` | Index a Markdown paper file into the local LanceDB vector store for future retrieval. |
 | `list_files` | List all indexed papers with their ingestion status. |
+| `delete_file` | Remove stale indexed entries when you need to clean up the local paper library. |
+| `status` | Check local RAG database health and configuration when query/ingest behavior looks wrong. |
 
 > If `local-rag` tools are not available (mcp-local-rag not installed), skip all local library steps and proceed directly to remote search.
 

@@ -41,6 +41,8 @@ GRaDOS is designed to sit inside an agent workflow:
 | mcp-local-rag | `query_documents` | Semantic + keyword search over locally indexed papers. |
 | mcp-local-rag | `ingest_file` | Index a paper's Markdown file into the local RAG database. |
 | mcp-local-rag | `list_files` | List all indexed papers with status. |
+| mcp-local-rag | `delete_file` | Remove stale indexed entries from the local RAG database. |
+| mcp-local-rag | `status` | Inspect local RAG database health and configuration warnings. |
 
 ## Installation 🚀
 
@@ -257,6 +259,8 @@ fetched_at: "2026-03-17T12:00:00.000Z"
 
 [mcp-local-rag](https://github.com/shinpr/mcp-local-rag) provides a local paper library with semantic search. GRaDOS automatically saves parsed Markdown files to a `papers/` directory that `mcp-local-rag` can index and make searchable. No Python is required - it is pure Node.js, just like GRaDOS.
 
+> **Version note:** the current `mcp-local-rag` 0.10.x line requires Node.js 20 or newer.
+
 **Register with your MCP client:**
 
 ```bash
@@ -304,7 +308,7 @@ args = ["-y", "mcp-local-rag"]
 env = { BASE_DIR = "/absolute/path/to/papers" }
 ```
 
-> **Important:** `BASE_DIR` must point to the same absolute directory as `extract.papersDirectory` in `mcp-config.json`. If `extract.papersDirectory` is relative, resolve it from `cwd` first.
+> **Important:** `BASE_DIR` must point to the same absolute directory as `extract.papersDirectory` in `mcp-config.json`. If `extract.papersDirectory` is relative, resolve it from `PROJECT_ROOT` first (usually the config file's directory).
 
 The storage split and ingest/query flow are described above in **Integrated Paper Knowledge Base**. The additional thing to remember here is that `mcp-local-rag` does **not** auto-scan directories - the agent still needs to call `ingest_file` for each new Markdown file.
 
@@ -382,7 +386,7 @@ The `extract.fetchStrategy.order` controls the full-text extraction priority:
 
 - `extract.downloadDirectory` defaults to `./downloads` and stores raw PDF files for archival use
 - `extract.papersDirectory` defaults to `./papers` and stores parsed Markdown for local indexing
-- relative paths are resolved from `cwd`; if you want storage elsewhere, use absolute paths
+- relative paths are resolved from `PROJECT_ROOT` (the config file's directory); if you want storage elsewhere, use absolute paths
 - `mcp-local-rag`'s `BASE_DIR` must point to the same absolute directory as `extract.papersDirectory`
 
 ## SKILL.md 🤖
