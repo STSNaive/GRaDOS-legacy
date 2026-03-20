@@ -1,5 +1,4 @@
 ---
-name: status
 description: Diagnose GRaDOS MCP server status, API key configuration, and dependency health.
 ---
 

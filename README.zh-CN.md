@@ -484,7 +484,7 @@ GRaDOS 可以作为 [Claude Code 插件](https://github.com/STSNaive/GRaDOS/tree
 ### 通过 Marketplace 安装
 
 ```bash
-/plugin marketplace add STSNaive/GRaDOS#claude-plugin
+/plugin marketplace add https://github.com/STSNaive/GRaDOS.git#claude-plugin
 /plugin install grados@grados-marketplace
 ```
 

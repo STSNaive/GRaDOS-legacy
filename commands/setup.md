@@ -1,5 +1,4 @@
 ---
-name: setup
 description: Guide the user through configuring GRaDOS MCP server, API keys, and optional dependencies.
 ---
 

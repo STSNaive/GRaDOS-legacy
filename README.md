@@ -482,7 +482,7 @@ GRaDOS is available as a [Claude Code plugin](https://github.com/STSNaive/GRaDOS
 ### Install via Marketplace
 
 ```bash
-/plugin marketplace add STSNaive/GRaDOS#claude-plugin
+/plugin marketplace add https://github.com/STSNaive/GRaDOS.git#claude-plugin
 /plugin install grados@grados-marketplace
 ```
 
