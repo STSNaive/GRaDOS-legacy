@@ -1,6 +1,8 @@
 {
   "name": "grados-marketplace",
-  "owner": { "name": "STSNaive" },
+  "owner": {
+    "name": "STSNaive"
+  },
   "metadata": {
     "description": "Academic research tools for Claude Code. Paper search, full-text extraction, and citation management.",
     "version": "1.0.0"
@@ -12,7 +14,14 @@
       "description": "Academic paper search, full-text extraction, PDF parsing, and Zotero citation management. Supports Crossref, PubMed, Scopus, Web of Science, Springer, Sci-Hub.",
       "version": "0.3.0",
       "category": "research",
-      "tags": ["academic", "papers", "research", "pdf", "literature-review", "zotero"]
+      "tags": [
+        "academic",
+        "papers",
+        "research",
+        "pdf",
+        "literature-review",
+        "zotero"
+      ]
     }
   ]
 }

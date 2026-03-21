@@ -479,12 +479,12 @@ env = { GRADOS_CONFIG_PATH = "D:/Projects/Papers/mcp-config.json" }
 
 ## Claude Code 插件 🔌
 
-GRaDOS 可以作为 [Claude Code 插件](https://github.com/STSNaive/GRaDOS/tree/claude-plugin) 使用，开箱即用地提供 skill、斜杠命令和 MCP 服务配置。
+GRaDOS 可以作为 Claude Code 插件使用，开箱即用地提供 skill、斜杠命令和 MCP 服务配置。
 
 ### 通过 Marketplace 安装
 
 ```bash
-/plugin marketplace add https://github.com/STSNaive/GRaDOS.git#claude-plugin
+/plugin marketplace add https://github.com/STSNaive/GRaDOS.git
 /plugin install grados@grados-marketplace
 ```
 

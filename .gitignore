@@ -45,9 +45,9 @@ Thumbs.db
 *_strategy.md
 TODO.md
 plan.md
+docs/
 
 # MCPB (local-only)
 .mcpbignore
 *.mcpb
 .DS_Store
-

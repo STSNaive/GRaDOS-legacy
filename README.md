@@ -88,7 +88,7 @@ If you use [Claude Code](https://code.claude.com/) (CLI or Desktop), install GRa
 
 ```bash
 # In Claude Code
-/plugin marketplace add STSNaive/GRaDOS#claude-plugin
+/plugin marketplace add STSNaive/GRaDOS
 /plugin install grados@stsnaive-grados
 ```
 
@@ -504,12 +504,12 @@ If you want storage in a different directory, use absolute paths in config:
 
 ## Claude Code Plugin 🔌
 
-GRaDOS is available as a [Claude Code plugin](https://github.com/STSNaive/GRaDOS/tree/claude-plugin), providing a skill, slash commands, and an MCP server configuration out of the box.
+GRaDOS is available as a Claude Code plugin, providing a skill, slash commands, and an MCP server configuration out of the box.
 
 ### Install via Marketplace
 
 ```bash
-/plugin marketplace add https://github.com/STSNaive/GRaDOS.git#claude-plugin
+/plugin marketplace add https://github.com/STSNaive/GRaDOS.git
 /plugin install grados@grados-marketplace
 ```
 

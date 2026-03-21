@@ -20,6 +20,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsc --watch",
+    "version": "node -e \"const fs=require('fs'); const v=require('./package.json').version; const update=(f,fn)=>{const o=JSON.parse(fs.readFileSync(f,'utf8'));fn(o);fs.writeFileSync(f,JSON.stringify(o,null,2)+'\\n')}; update('.claude-plugin/plugin.json',o=>{o.version=v}); update('.claude-plugin/marketplace.json',o=>{o.plugins[0].version=v}); console.log('Synced plugin version to '+v)\" && git add .claude-plugin/plugin.json .claude-plugin/marketplace.json",
     "prepublishOnly": "npm run build",
     "pack:mcpb": "npm run build && mcpb pack"
   },
