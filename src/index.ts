@@ -306,8 +306,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                         },
                         limit: {
                             type: "number",
-                            description: "Maximum number of results to return.",
-                            default: 10
+                            description: "Maximum number of results to return (default: 15).",
+                            default: 15
                         }
                     },
                     required: ["query"]
@@ -315,7 +315,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             {
                 name: "extract_paper_full_text",
-                description: "Given a DOI, attempts to fetch the full text of the paper using a waterfall strategy. Returns markdown-formatted text. Includes QA validation to ensure it's not a paywall.",
+                description: "Given a DOI, attempts to fetch the full text of the paper using a waterfall strategy. Saves full text to papers/{safe_doi}.md and returns a compact summary (title, DOI, file path, opening paragraphs). Use your file reading tool to access the full text when needed. Includes QA validation to ensure it's not a paywall.",
                 inputSchema: {
                     type: "object",
                     properties: {
@@ -449,6 +449,17 @@ function isValidPaperContent(text: string, doi: string, minCharacters: number = 
     }
 
     return true;
+}
+
+// --- Helper: Extract Opening Paragraphs for Compact Summary ---
+function extractOpening(text: string, maxParagraphs: number): string {
+    // Skip YAML front-matter (if present)
+    let content = text.replace(/^---[\s\S]*?---\n*/, '');
+    // Skip leading # heading lines
+    content = content.replace(/^#[^\n]*\n+/, '');
+    // Split by double newlines into paragraphs
+    const paragraphs = content.split(/\n{2,}/).filter(p => p.trim().length > 0);
+    return paragraphs.slice(0, maxParagraphs).join('\n\n');
 }
 
 // --- Fetch Strategies (Phase 1) ---
@@ -1002,7 +1013,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     if (name === "search_academic_papers") {
         const query = String(args?.query || "");
-        const limit = Number(args?.limit || 10);
+        const limit = Number(args?.limit || 15);
 
         // DEFAULT CONFIG IF NOT SET
         const searchOrder = config?.search?.order || ["Elsevier", "Springer", "WebOfScience", "PubMed", "Crossref"];
@@ -1262,14 +1273,35 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
              };
         }
 
+        // Build compact summary for context window (full text already saved to papers/)
+        const safeDoiForReturn = doi.replace(/[^a-z0-9]/gi, '_');
+        const openingParagraphs = extractOpening(finalExtractedText, 3);
+        const wordCount = finalExtractedText.split(/\s+/).length;
+        const charCount = finalExtractedText.length;
+        const title = expectedTitle || "(unknown)";
+
         return {
             content: [
                 {
                     type: "text",
-                    text: `# Extracted Paper Full Text [Source: ${successfulSource}]
-## DOI: ${doi}
-
-${finalExtractedText}`
+                    text: [
+                        `# Paper Extracted Successfully [Source: ${successfulSource}]`,
+                        ``,
+                        `| Field | Value |`,
+                        `|-------|-------|`,
+                        `| **Title** | ${title} |`,
+                        `| **DOI** | ${doi} |`,
+                        `| **File** | \`papers/${safeDoiForReturn}.md\` |`,
+                        `| **Length** | ${wordCount} words / ${charCount} chars |`,
+                        `| **Source** | ${successfulSource} |`,
+                        ``,
+                        `## Opening Content`,
+                        ``,
+                        openingParagraphs,
+                        ``,
+                        `---`,
+                        `> **Full text saved to \`papers/${safeDoiForReturn}.md\`.** Use your file reading tool to access complete content when needed for synthesis.`,
+                    ].join('\n')
                 }
             ]
         };

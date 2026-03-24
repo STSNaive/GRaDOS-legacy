@@ -12,7 +12,7 @@
 | Tool | Purpose |
 |---|---|
 | `grados:search_academic_papers` | Waterfall search across academic databases (Crossref, PubMed, Web of Science, Elsevier, Springer). Returns deduplicated paper metadata with DOIs and abstracts. |
-| `grados:extract_paper_full_text` | Fetch full-text paper by DOI via TDM -> OA -> Sci-Hub -> Headless waterfall, then parse PDF via LlamaParse -> Marker -> Native. Auto-saves `.md` to `papers/` directory. |
+| `grados:extract_paper_full_text` | Fetch full-text paper by DOI via TDM -> OA -> Sci-Hub -> Headless waterfall, then parse PDF via LlamaParse -> Marker -> Native. Auto-saves `.md` to `papers/` directory. **Returns a compact summary** (title, DOI, file path, opening paragraphs), not the full text — use the Read tool to access full content from `papers/{safe_doi}.md`. |
 | `grados:parse_pdf_file` | Parse a local PDF file using the configured parsing waterfall (LlamaParse -> Marker -> Native). Use when you have downloaded a PDF via browser automation (e.g., Playwright MCP) and need to extract text. If DOI is provided, saves `.md` to `papers/` with front-matter. |
 | `grados:save_paper_to_zotero` | Save cited paper metadata to Zotero web library. Requires ZOTERO_API_KEY and zotero.libraryId in config. |
 

@@ -19,6 +19,16 @@ All search queries MUST be in **English**. All answers to the user MUST be in **
 
 For tool details and parameters, see [references/tools.md](references/tools.md).
 
+## Information Architecture
+
+This skill uses a **three-tier information strategy** to keep your context window clean:
+
+1. **Search** (Step 1) returns paper metadata (title, abstract, DOI) — ~200-500 tokens each.
+2. **Extract** (Step 3) saves full text to `papers/{safe_doi}.md` but returns only a **compact summary** (title, DOI, file path, opening paragraphs) — ~500-800 tokens each.
+3. **Synthesis** (Step 4) requires you to **Read full papers from disk** — never synthesize from compact summaries alone.
+
+This design keeps Steps 1-3 lightweight (~10K tokens total for 8 papers) while preserving full text on disk for deep reading in Step 4.
+
 ---
 
 ## Step 0: Check Local Paper Library
@@ -39,7 +49,7 @@ Before querying remote databases, check if relevant papers already exist in the 
 
 1. Analyze the user's question. Identify core scientific variables, methods, or phenomena.
 2. Formulate **2-3 precise English search strings** (use Boolean operators if helpful).
-3. For each search string, call `grados:search_academic_papers` with an appropriate `limit` (default 10).
+3. For each search string, call `grados:search_academic_papers` with an appropriate `limit` (default 15).
 
 ## Step 2: Relevance Screening
 
@@ -47,19 +57,21 @@ After receiving search results, screen every paper for relevance:
 
 1. **If the paper has an abstract**: Read it. Decide if it directly addresses the user's question.
 2. **If the paper has no abstract**: Judge relevance from the **title alone**. If the title is clearly on-topic, keep it; if ambiguous or off-topic, discard it.
-3. Discard all irrelevant papers. Keep only the **top 3-5 most relevant** DOIs for full-text extraction.
+3. Discard clearly irrelevant papers. Keep **5-8 papers** that are potentially relevant for full-text extraction. Prefer breadth over precision at this stage — compact summaries from extraction are cheap (~500-800 tokens each), and you decide which papers need deep reading later in Step 4.
 4. Record why you kept each paper (one sentence) — this helps the Double-Check step later.
 
 ## Step 3: Full-Text Extraction & Indexing
 
 1. For each relevant DOI from Step 2, call `grados:extract_paper_full_text`. **Always pass `expected_title`** (the paper's title from the search results) so the server can validate the extracted content.
+   - If `papers/{safe_doi}.md` already exists (from a previous query or the local library), skip re-extraction for that DOI.
 2. Successfully extracted papers are automatically saved as `.md` files to the `papers/` directory.
-3. After each successful extraction, call `local-rag:ingest_file` on the saved `.md` file to index it for future reuse. The file path follows the pattern: `papers/{safe_doi}.md` where `safe_doi` replaces non-alphanumeric characters with `_`.
+3. **The tool returns a compact summary** (title, DOI, file path, opening paragraphs), NOT the full text. Full text is saved to `papers/{safe_doi}.md`. You will use the **Read tool** to access full text on demand in Step 4.
+4. After each successful extraction, call `local-rag:ingest_file` on the saved `.md` file to index it for future reuse. The file path follows the pattern: `papers/{safe_doi}.md` where `safe_doi` replaces non-alphanumeric characters with `_`.
    - **Only ingest `.md` files**, never `.pdf` — this prevents duplicate content in the vector database.
-4. **If extraction fails** (the tool returns an error):
+5. **If extraction fails** (the tool returns an error):
    - If the paper seemed **strongly relevant** based on its abstract, record it in a failed-extraction section at the end of your report, including its title, DOI, and abstract summary.
    - If the paper was only marginally relevant, silently skip it.
-5. **Do NOT attempt to extract more than 5 papers** in a single query to conserve API quota and time.
+6. **Do NOT attempt to extract more than 8 papers** in a single query to conserve API quota and time.
 
 ## Step 3b: Browser-Assisted Extraction (Playwright MCP Fallback)
 
@@ -76,22 +88,27 @@ If `extract_paper_full_text` fails for a strongly relevant paper (returns error 
 
 ## Step 4: Information Synthesis, Citation & Zotero
 
-1. Read all extracted full-text Markdown carefully — both from the local library (Step 0) and from remote extraction (Step 3).
+1. For each paper you plan to cite, use the **Read tool** to load its full text from `papers/{safe_doi}.md`. Prioritize papers whose compact summaries (from Step 3) appear most relevant to the user's question. Focus on the **3-5 most relevant papers** for deep reading — you do not need to read every extracted paper.
+   - **Do NOT synthesize from the compact summaries** in your tool output history — they contain only the opening paragraphs and are insufficient for accurate citation.
+   - If your context has been compacted, earlier tool outputs may be gone entirely. The files in `papers/` are your authoritative source.
+   - Also incorporate any relevant content from the local library (Step 0).
 2. Synthesize an answer to the user's original question **in Chinese**.
-3. **Citation rule**: Every factual claim MUST include an inline citation, e.g. `[Smith et al., 2023]`. No unsupported claims allowed.
+3. **Citation rule**: Every factual claim MUST include an inline citation, e.g. `[Smith et al., 2023]`. Only cite content you have actually **Read from a paper file** in this session. No unsupported claims allowed.
 4. After completing the synthesis, for each paper that was **actually cited** in the answer, call `grados:save_paper_to_zotero` with its full metadata (title, DOI, authors, abstract, journal, year, url, tags). Pass the query topic as a tag so papers are organised by research theme.
    - Only save papers that contributed to the final answer — do not save papers that were screened out or failed extraction.
    - If `grados:save_paper_to_zotero` returns an error (e.g. Zotero not configured), silently skip and continue.
 
 ## Step 5: Double-Check Protocol (CRITICAL)
 
+> If earlier tool outputs have been compressed or truncated by the harness, re-Read the relevant papers from `papers/` directory before verifying claims. Never verify a claim against your memory of a paper — verify against the actual file content.
+
 Before presenting your final answer:
 
 1. Re-examine every claim in your synthesis.
-2. For each claim, verify that the **exact extracted text** in your context window supports it.
+2. For each claim, use the **Read tool** to verify that the actual text in `papers/{safe_doi}.md` supports it. Do not rely on your memory of the paper or stale context.
 3. **Delete** any claim not explicitly supported by the extracted papers.
 4. If the papers don't fully answer the question, state clearly in Chinese that the retrieved literature does not cover the specific aspect, and specify what it does cover.
-5. Do **NOT** fill gaps with pre-trained knowledge. Only cite what you extracted.
+5. Do **NOT** fill gaps with pre-trained knowledge. Only cite what you extracted and verified from files.
 
 ## Output Format
 
