@@ -130,6 +130,8 @@ grados --init
 # (see mcp-config.example.json for all options)
 ```
 
+To check for updates: `npm outdated -g grados` — if a newer version is available, run `npm install -g grados` again.
+
 ### Option C: From source 🛠️
 
 ```bash
@@ -256,6 +258,8 @@ Marker successfully converted PDF to Markdown.
 [mcp-local-rag](https://github.com/shinpr/mcp-local-rag) provides semantic and keyword retrieval for local papers. Pure Node.js, no Python required.
 
 > **Version note:** the current `mcp-local-rag` 0.10.x line requires Node.js 20 or newer.
+>
+> **Check for updates:** `npm outdated -g mcp-local-rag` — if a newer version is available, run `npm install -g mcp-local-rag` again.
 
 **Register with your MCP client:**
 
@@ -345,6 +349,8 @@ The built-in Puppeteer fallback supports **Windows, macOS, and Linux** for the b
 ```bash
 npm install -g @playwright/mcp
 ```
+
+To check for updates: `npm outdated -g @playwright/mcp` — if a newer version is available, run `npm install -g @playwright/mcp` again.
 
 **Register with your MCP client:**
 
