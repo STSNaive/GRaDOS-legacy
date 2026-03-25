@@ -1,6 +1,6 @@
 {
   "name": "grados",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "The enrichment-grade MCP server for academic paper search and full-text extraction. For science.",
   "main": "dist/index.js",
   "bin": {

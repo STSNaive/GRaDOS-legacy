@@ -12,7 +12,7 @@
       "name": "grados",
       "source": "./",
       "description": "Academic paper search, full-text extraction, PDF parsing, and Zotero citation management. Supports Crossref, PubMed, Scopus, Web of Science, Springer, Sci-Hub.",
-      "version": "0.4.1",
+      "version": "0.5.0",
       "category": "research",
       "tags": [
         "academic",
