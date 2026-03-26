@@ -4,7 +4,7 @@ dist/
 
 # Secrets & user config
 .env
-mcp-config.json
+grados-config.json
 manifest.json
 
 # Marker worker runtime

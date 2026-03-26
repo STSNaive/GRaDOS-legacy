@@ -14,9 +14,9 @@ Run `npx -y grados --version` and report the version. If it fails, report that G
 
 Check for config files in this priority order:
 
-1. **Plugin data directory**: `${CLAUDE_PLUGIN_DATA}/mcp-config.json` (used when installed as a Claude Code plugin)
+1. **Plugin data directory**: `${CLAUDE_PLUGIN_DATA}/grados-config.json` (used when installed as a Claude Code plugin)
 2. **GRADOS_CONFIG_PATH** environment variable (if set)
-3. **Current directory**: `./mcp-config.json`
+3. **Current directory**: `./grados-config.json`
 
 For each path, check if the file exists. Report which config file GRaDOS would use.
 

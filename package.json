@@ -8,7 +8,7 @@
   },
   "files": [
     "dist/index.js",
-    "mcp-config.example.json",
+    "grados-config.example.json",
     "marker-worker/worker.py",
     "marker-worker/runtime_env.py",
     "marker-worker/prewarm.py",

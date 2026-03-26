@@ -43,7 +43,7 @@ Before querying remote databases, check if relevant papers already exist in the 
 3. If the local library fully answers the user's question (>= 3 relevant papers with good coverage), you may **skip Steps 1-3** and go directly to Step 4 (Synthesis).
 4. If not, proceed to Step 1 but **exclude DOIs already found locally** from extraction in Step 3.
 
-> If `local-rag` tools are not available, or `localRag.enabled` is set to `false` in `mcp-config.json`, skip this step and proceed directly to Step 1.
+> If `local-rag` tools are not available, or `localRag.enabled` is set to `false` in `grados-config.json`, skip this step and proceed directly to Step 1.
 
 ## Step 1: Query Decomposition
 

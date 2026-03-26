@@ -2,7 +2,7 @@
   "mcpServers": {
     "grados": {
       "command": "npx",
-      "args": ["-y", "grados", "--config", "${CLAUDE_PLUGIN_DATA}/mcp-config.json"]
+      "args": ["-y", "grados", "--config", "${CLAUDE_PLUGIN_DATA}/grados-config.json"]
     },
     "local-rag": {
       "command": "npx",

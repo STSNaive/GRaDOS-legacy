@@ -14,12 +14,12 @@ Run `node --version` to confirm Node.js is installed (v18+ required, v20+ for mc
 
 ## 2. Generate Config File
 
-The plugin stores configuration at `${CLAUDE_PLUGIN_DATA}/mcp-config.json`.
+The plugin stores configuration at `${CLAUDE_PLUGIN_DATA}/grados-config.json`.
 
 Check if the config file already exists:
 
 ```bash
-test -f "${CLAUDE_PLUGIN_DATA}/mcp-config.json" && echo "Config exists" || echo "Config not found"
+test -f "${CLAUDE_PLUGIN_DATA}/grados-config.json" && echo "Config exists" || echo "Config not found"
 ```
 
 If it does NOT exist, create it by running:
@@ -28,14 +28,14 @@ If it does NOT exist, create it by running:
 cd "${CLAUDE_PLUGIN_DATA}" && npx -y grados --init
 ```
 
-This generates `mcp-config.json` with default settings. The `papers/` and `downloads/` directories will be created automatically under `${CLAUDE_PLUGIN_DATA}/` when papers are extracted.
+This generates `grados-config.json` with default settings. The `papers/` and `downloads/` directories will be created automatically under `${CLAUDE_PLUGIN_DATA}/` when papers are extracted.
 
 ## 3. Guide User to Configure API Keys
 
 Tell the user:
 
 > The config file has been created at:
-> `${CLAUDE_PLUGIN_DATA}/mcp-config.json`
+> `${CLAUDE_PLUGIN_DATA}/grados-config.json`
 >
 > Please open this file in your editor and fill in the API keys you have.
 > **No keys are strictly required** — Crossref, PubMed, Unpaywall, and Sci-Hub work with zero configuration.

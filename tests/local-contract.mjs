@@ -51,7 +51,7 @@ async function run() {
     mkdirSync(papersDir, { recursive: true });
     mkdirSync(downloadsDir, { recursive: true });
 
-    const configPath = join(tempDir, 'mcp-config.json');
+    const configPath = join(tempDir, 'grados-config.json');
     writeFileSync(configPath, JSON.stringify({
         extract: {
             papersDirectory: './papers',

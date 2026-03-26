@@ -30,7 +30,7 @@ const puppeteer = addExtra(puppeteerVanilla as any);
 puppeteer.use(StealthPlugin());
 
 // --- Path Resolution ---
-// PACKAGE_ROOT: where grados is installed (contains marker-worker/, mcp-config.example.json, etc.)
+// PACKAGE_ROOT: where grados is installed (contains marker-worker/, grados-config.example.json, etc.)
 // In dist/index.js, __dirname is <install>/dist, so the package root is one level up.
 const PACKAGE_ROOT = path.resolve(__dirname, "..");
 
@@ -111,17 +111,17 @@ function handleCliFlags(): void {
     }
 
     if (process.argv.includes("--init")) {
-        const exampleSrc = path.join(PACKAGE_ROOT, "mcp-config.example.json");
-        const destPath = path.join(process.cwd(), "mcp-config.json");
+        const exampleSrc = path.join(PACKAGE_ROOT, "grados-config.example.json");
+        const destPath = path.join(process.cwd(), "grados-config.json");
 
         if (fs.existsSync(destPath)) {
-            console.log("mcp-config.json already exists in this directory. No changes made.");
+            console.log("grados-config.json already exists in this directory. No changes made.");
         } else if (!fs.existsSync(exampleSrc)) {
-            console.error("Could not find mcp-config.example.json in the package. Please create mcp-config.json manually.");
+            console.error("Could not find grados-config.example.json in the package. Please create grados-config.json manually.");
             process.exitCode = 1;
         } else {
             fs.copyFileSync(exampleSrc, destPath);
-            console.log(`Created mcp-config.json in ${process.cwd()}`);
+            console.log(`Created grados-config.json in ${process.cwd()}`);
             console.log("Edit this file to add your API keys and configure GRaDOS.");
         }
         process.exit();
@@ -135,7 +135,7 @@ dotenv.config();
 // Apply a stealthy global User-Agent to evade basic 403 Forbidden blocks
 axios.defaults.headers.common['User-Agent'] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
-// Resolve config file path: --config <path> > GRADOS_CONFIG_PATH env > cwd/mcp-config.json
+// Resolve config file path: --config <path> > GRADOS_CONFIG_PATH env > cwd/grados-config.json
 function resolveConfigPath(): string {
     const argIdx = process.argv.indexOf("--config");
     if (argIdx !== -1 && process.argv[argIdx + 1]) {
@@ -144,7 +144,7 @@ function resolveConfigPath(): string {
     if (process.env.GRADOS_CONFIG_PATH) {
         return path.resolve(process.env.GRADOS_CONFIG_PATH);
     }
-    return path.join(process.cwd(), "mcp-config.json");
+    return path.join(process.cwd(), "grados-config.json");
 }
 
 const CONFIG_PATH = resolveConfigPath();
@@ -175,7 +175,7 @@ if (config?.apiKeys) {
 
 // Warn if academic etiquette email is still the default placeholder
 if (!config.academicEtiquetteEmail || config.academicEtiquetteEmail === "admin@example.com") {
-    console.error("[GRaDOS] WARNING: academicEtiquetteEmail is not configured. Crossref/Unpaywall may throttle requests. Set a real email in mcp-config.json.");
+    console.error("[GRaDOS] WARNING: academicEtiquetteEmail is not configured. Crossref/Unpaywall may throttle requests. Set a real email in grados-config.json.");
 }
 
 // Helpers to get API keys (Config file overrides .env, which is the MCPB path)
@@ -573,7 +573,7 @@ const TOOL_REGISTRY: ToolRegistryEntry[] = [
     },
     {
         name: "save_paper_to_zotero",
-        description: "Saves a paper's bibliographic metadata to the Zotero web library. Call this after synthesis for each paper that was cited in the final answer. Requires ZOTERO_API_KEY and zotero.libraryId in mcp-config.json.",
+        description: "Saves a paper's bibliographic metadata to the Zotero web library. Call this after synthesis for each paper that was cited in the final answer. Requires ZOTERO_API_KEY and zotero.libraryId in grados-config.json.",
         purpose: "Save cited paper metadata to the Zotero web library",
         returns: "Structured success/error status with the Zotero item key when available.",
         commonFailures: ["ZOTERO_API_KEY not configured", "libraryId not set", "Network error"],
@@ -2034,8 +2034,8 @@ async function saveToZotero(params: {
     const libraryId = config?.zotero?.libraryId || process.env.ZOTERO_LIBRARY_ID;
     const libraryType = config?.zotero?.libraryType || process.env.ZOTERO_LIBRARY_TYPE || "user";
 
-    if (!apiKey) return { success: false, error: "ZOTERO_API_KEY is not configured in mcp-config.json apiKeys." };
-    if (!libraryId) return { success: false, error: "zotero.libraryId is not configured in mcp-config.json." };
+    if (!apiKey) return { success: false, error: "ZOTERO_API_KEY is not configured in grados-config.json apiKeys." };
+    if (!libraryId) return { success: false, error: "zotero.libraryId is not configured in grados-config.json." };
 
     const collectionKey = params.collectionKey || config?.zotero?.defaultCollectionKey || undefined;
 

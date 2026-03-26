@@ -107,7 +107,7 @@ If you use [Claude Code](https://code.claude.com/) (CLI or Desktop), install GRa
 /grados:setup
 ```
 
-This creates `${CLAUDE_PLUGIN_DATA}/mcp-config.json` and guides you through setting API keys. The plugin also points `local-rag` at `${CLAUDE_PLUGIN_DATA}/papers`, so no environment variables or shell profile editing are required for the default setup.
+This creates `${CLAUDE_PLUGIN_DATA}/grados-config.json` and guides you through setting API keys. The plugin also points `local-rag` at `${CLAUDE_PLUGIN_DATA}/papers`, so no environment variables or shell profile editing are required for the default setup.
 
 **3. Reload and verify:**
 
@@ -127,7 +127,7 @@ npm install -g grados
 grados --init
 
 # Edit the config with your API keys
-# (see mcp-config.example.json for all options)
+# (see grados-config.example.json for all options)
 ```
 
 To check for updates: `npm outdated -g grados` — if a newer version is available, run `npm install -g grados` again.
@@ -140,8 +140,8 @@ cd GRaDOS
 npm install
 npm run build
 
-cp mcp-config.example.json mcp-config.json
-# Edit mcp-config.json with your API keys
+cp grados-config.example.json grados-config.json
+# Edit grados-config.json with your API keys
 ```
 
 ### Configure your MCP client 🔌
@@ -158,7 +158,7 @@ claude mcp add --transport stdio grados -- npx -y grados
 codex mcp add grados -- npx -y grados
 ```
 
-If you want GRaDOS to load a specific `mcp-config.json`, use `--config` (recommended) or `GRADOS_CONFIG_PATH`:
+If you want GRaDOS to load a specific `grados-config.json`, use `--config` (recommended) or `GRADOS_CONFIG_PATH`:
 
 Claude Code (`.claude/settings.json`):
 
@@ -167,7 +167,7 @@ Claude Code (`.claude/settings.json`):
   "mcpServers": {
     "grados": {
       "command": "npx",
-      "args": ["-y", "grados", "--config", "/path/to/mcp-config.json"]
+      "args": ["-y", "grados", "--config", "/path/to/grados-config.json"]
     }
   }
 }
@@ -178,7 +178,7 @@ Codex (`~/.codex/config.toml`):
 ```toml
 [mcp_servers.grados]
 command = "npx"
-args = ["-y", "grados", "--config", "/path/to/mcp-config.json"]
+args = ["-y", "grados", "--config", "/path/to/grados-config.json"]
 ```
 
 The same GRaDOS API surface is available whether the server is started via `npx`, source checkout, or bundled inside the Claude plugin. Installation method only changes how the stdio server is launched and where its config file lives.
@@ -220,7 +220,7 @@ By default, Marker auto-detects the best torch device. On macOS, this allows PyT
 
 > **local.env behavior:** GRaDOS reads `MARKER_PYTHON` from `marker-worker/local.env` first, then falls back to standard `.venv/` interpreter locations. This means both the bundled installer and manual setups can point GRaDOS at the correct Python environment without changing the main config file.
 
-**Enable in config:** After installation, update `mcp-config.json` to enable Marker:
+**Enable in config:** After installation, update `grados-config.json` to enable Marker:
 
 ```json
 {
@@ -308,7 +308,7 @@ args = ["-y", "mcp-local-rag"]
 env = { BASE_DIR = "/absolute/path/to/papers" }
 ```
 
-> **Important:** `BASE_DIR` must point to the same absolute directory as `extract.papersDirectory` in `mcp-config.json`. If `extract.papersDirectory` is relative, resolve it from `PROJECT_ROOT` first (usually the config file's directory).
+> **Important:** `BASE_DIR` must point to the same absolute directory as `extract.papersDirectory` in `grados-config.json`. If `extract.papersDirectory` is relative, resolve it from `PROJECT_ROOT` first (usually the config file's directory).
 
 
 ### Optional: Zotero web library integration 📚
@@ -319,7 +319,7 @@ GRaDOS can automatically save cited papers to your [Zotero](https://www.zotero.o
 
 1. Get your **API key** at `https://www.zotero.org/settings/keys` -> New Key -> check "Write Access".
 2. Get your **library ID** (numeric user ID shown on the same page as "Your userID for use in API calls").
-3. Add both to `mcp-config.json`:
+3. Add both to `grados-config.json`:
 
 ```json
 {
@@ -342,7 +342,7 @@ When GRaDOS's built-in headless browser (Puppeteer) fails to extract a PDF — t
 
 **Why Playwright MCP over raw Puppeteer?** Puppeteer uses hardcoded CSS selectors that break on unfamiliar publisher pages. With Playwright MCP, the LLM sees the page structure and can adaptively click the right download button, regardless of layout. This is token-expensive (~13.7K base + page content), so it's only used as a fallback when the zero-cost Puppeteer path fails.
 
-The built-in Puppeteer fallback supports **Windows, macOS, and Linux** for the browser type you configure. GRaDOS only probes paths for the configured browser (`msedge`, `chrome`, or `firefox`) on the current OS, and you can override the executable directly with `headlessBrowser.executablePath` in `mcp-config.json`.
+The built-in Puppeteer fallback supports **Windows, macOS, and Linux** for the browser type you configure. GRaDOS only probes paths for the configured browser (`msedge`, `chrome`, or `firefox`) on the current OS, and you can override the executable directly with `headlessBrowser.executablePath` in `grados-config.json`.
 
 **Install:**
 
@@ -381,7 +381,7 @@ The `SKILL.md` workflow (Step 3b) automatically guides the agent to use Playwrig
 
 ### Configuration Example: GRaDOS + mcp-local-rag + Playwright 🧩
 
-If you want to wire up the most common end-to-end research workflow in one shot, configure these three MCP services together. This example assumes your config file lives at `D:/Projects/Papers/mcp-config.json`, and that `extract.papersDirectory` uses the default relative path `./papers`, so `mcp-local-rag` should point `BASE_DIR` to `D:/Projects/Papers/papers`.
+If you want to wire up the most common end-to-end research workflow in one shot, configure these three MCP services together. This example assumes your config file lives at `D:/Projects/Papers/grados-config.json`, and that `extract.papersDirectory` uses the default relative path `./papers`, so `mcp-local-rag` should point `BASE_DIR` to `D:/Projects/Papers/papers`.
 
 Claude Code (`.claude/settings.json`):
 
@@ -390,7 +390,7 @@ Claude Code (`.claude/settings.json`):
   "mcpServers": {
     "grados": {
       "command": "npx",
-      "args": ["-y", "grados", "--config", "D:/Projects/Papers/mcp-config.json"]
+      "args": ["-y", "grados", "--config", "D:/Projects/Papers/grados-config.json"]
     },
     "local-rag": {
       "command": "npx",
@@ -412,7 +412,7 @@ Codex (`~/.codex/config.toml`):
 ```toml
 [mcp_servers.grados]
 command = "npx"
-args = ["-y", "grados", "--config", "D:/Projects/Papers/mcp-config.json"]
+args = ["-y", "grados", "--config", "D:/Projects/Papers/grados-config.json"]
 
 [mcp_servers.local-rag]
 command = "npx"
@@ -426,7 +426,7 @@ args = ["@playwright/mcp", "--headless"]
 
 ## Configuration ⚙️
 
-All configuration lives in a single file: `mcp-config.json`. Run `grados --init` to generate one from the template.
+All configuration lives in a single file: `grados-config.json`. Run `grados --init` to generate one from the template.
 
 ### API Keys 🔑
 
@@ -491,18 +491,18 @@ GRaDOS resolves paths in two separate scopes:
 
 1. `--config <path>` CLI argument
 2. `GRADOS_CONFIG_PATH` environment variable
-3. `cwd/mcp-config.json` (default fallback)
+3. `cwd/grados-config.json` (default fallback)
 
-The directory containing the resolved config file becomes `PROJECT_ROOT`. All relative paths in `mcp-config.json` (like `./papers`, `./downloads`) resolve from there — not from `cwd`.
+The directory containing the resolved config file becomes `PROJECT_ROOT`. All relative paths in `grados-config.json` (like `./papers`, `./downloads`) resolve from there — not from `cwd`.
 
 **Examples:**
 
 ```bash
 # Explicit config path (recommended for MCP client setup)
-grados --config D:/Projects/Papers/mcp-config.json
+grados --config D:/Projects/Papers/grados-config.json
 
 # Or via environment variable
-GRADOS_CONFIG_PATH=D:/Projects/Papers/mcp-config.json grados
+GRADOS_CONFIG_PATH=D:/Projects/Papers/grados-config.json grados
 ```
 
 Claude Code (`.claude/settings.json`) — using `--config` instead of `cwd`:
@@ -512,7 +512,7 @@ Claude Code (`.claude/settings.json`) — using `--config` instead of `cwd`:
   "mcpServers": {
     "grados": {
       "command": "npx",
-      "args": ["-y", "grados", "--config", "D:/Projects/Papers/mcp-config.json"]
+      "args": ["-y", "grados", "--config", "D:/Projects/Papers/grados-config.json"]
     }
   }
 }
@@ -524,7 +524,7 @@ Codex (`~/.codex/config.toml`) — using env var:
 [mcp_servers.grados]
 command = "npx"
 args = ["-y", "grados"]
-env = { GRADOS_CONFIG_PATH = "D:/Projects/Papers/mcp-config.json" }
+env = { GRADOS_CONFIG_PATH = "D:/Projects/Papers/grados-config.json" }
 ```
 
 If you want storage in a different directory, use absolute paths in config:
@@ -555,11 +555,11 @@ GRaDOS is available as a Claude Code plugin, providing a skill, slash commands, 
 
 The bundled `.mcp.json` wires the plugin up like this:
 
-- `grados` is launched with `--config ${CLAUDE_PLUGIN_DATA}/mcp-config.json`
+- `grados` is launched with `--config ${CLAUDE_PLUGIN_DATA}/grados-config.json`
 - `local-rag` is launched with `BASE_DIR=${CLAUDE_PLUGIN_DATA}/papers`
 - `playwright` is launched in headless mode
 
-Run `/grados:setup` to create `${CLAUDE_PLUGIN_DATA}/mcp-config.json`, edit that file with the API keys you want to use, then run `/reload-plugins` so the bundled MCP servers pick up the updated config. No shell environment variables are required for the default plugin workflow.
+Run `/grados:setup` to create `${CLAUDE_PLUGIN_DATA}/grados-config.json`, edit that file with the API keys you want to use, then run `/reload-plugins` so the bundled MCP servers pick up the updated config. No shell environment variables are required for the default plugin workflow.
 
 Run `/grados:status` to verify the final setup.
 

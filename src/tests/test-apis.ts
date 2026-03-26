@@ -4,7 +4,7 @@ import * as path from "path";
 
 async function testKeys() {
     console.log("Loading config...");
-    const configPath = path.join(process.cwd(), "mcp-config.json");
+    const configPath = path.join(process.cwd(), "grados-config.json");
     const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
     const keys = config.apiKeys;
     const query = "machine learning";

@@ -8,11 +8,11 @@ import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
 
 const QUERY = 'elastic metamaterial';
-const CONFIG_PATH = join(process.cwd(), 'mcp-config.json');
-const CONFIG_BACKUP = join(process.cwd(), 'mcp-config.json.bak');
+const CONFIG_PATH = join(process.cwd(), 'grados-config.json');
+const CONFIG_BACKUP = join(process.cwd(), 'grados-config.json.bak');
 
 if (!existsSync(CONFIG_PATH)) {
-    console.log('Skipping module-test: mcp-config.json not found in repository root.');
+    console.log('Skipping module-test: grados-config.json not found in repository root.');
     process.exit(0);
 }
 
