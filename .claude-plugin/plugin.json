@@ -1,7 +1,7 @@
 {
   "name": "grados",
   "description": "Academic paper search and full-text extraction MCP server. Searches Crossref, PubMed, Scopus, Web of Science, Springer; extracts full text; parses PDFs; saves to Zotero.",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "author": {
     "name": "STSNaive"
   },
