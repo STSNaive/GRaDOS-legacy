@@ -338,11 +338,11 @@ Papers are saved as `journalArticle` items with title, DOI, authors, abstract, j
 
 ### Optional: Playwright MCP (LLM-friendly browser fallback) 🌐
 
-When GRaDOS's built-in headless browser (Puppeteer) fails to extract a PDF — typically due to complex publisher page layouts or CAPTCHA challenges — the AI agent can fall back to [Playwright MCP](https://github.com/microsoft/playwright-mcp), which gives the LLM direct browser control through accessibility tree snapshots.
+When GRaDOS's built-in headless browser (Patchright) fails to extract a PDF — typically due to complex publisher page layouts or CAPTCHA challenges — the AI agent can fall back to [Playwright MCP](https://github.com/microsoft/playwright-mcp), which gives the LLM direct browser control through accessibility tree snapshots.
 
-**Why Playwright MCP over raw Puppeteer?** Puppeteer uses hardcoded CSS selectors that break on unfamiliar publisher pages. With Playwright MCP, the LLM sees the page structure and can adaptively click the right download button, regardless of layout. This is token-expensive (~13.7K base + page content), so it's only used as a fallback when the zero-cost Puppeteer path fails.
+**Why Playwright MCP over the built-in browser?** The built-in browser uses hardcoded CSS selectors that break on unfamiliar publisher pages. With Playwright MCP, the LLM sees the page structure and can adaptively click the right download button, regardless of layout. This is token-expensive (~13.7K base + page content), so it's only used as a fallback when the zero-cost built-in path fails.
 
-The built-in Puppeteer fallback supports **Windows, macOS, and Linux** for the browser type you configure. GRaDOS only probes paths for the configured browser (`msedge`, `chrome`, or `firefox`) on the current OS, and you can override the executable directly with `headlessBrowser.executablePath` in `grados-config.json`.
+The built-in headless browser uses **Patchright** (a Playwright fork with CDP-level anti-detection patches) and supports **Windows, macOS, and Linux**. It requires a Chromium-based browser (`msedge` or `chrome`). GRaDOS probes paths for the configured browser on the current OS, and you can override the executable directly with `headlessBrowser.executablePath` in `grados-config.json`.
 
 **Install:**
 
@@ -377,7 +377,7 @@ Or configure manually — Claude Code (`.claude/settings.json`):
 
 The `SKILL.md` workflow (Step 3b) automatically guides the agent to use Playwright MCP tools when `extract_paper_full_text` fails. The workflow is: `browser_navigate` → `browser_snapshot` → `browser_click` → download → `parse_pdf_file`.
 
-> **Note:** Playwright MCP is entirely optional. Without it, GRaDOS still works through its built-in waterfall (TDM → OA → Sci-Hub → Headless Puppeteer). Playwright MCP adds an LLM-driven safety net for the cases Puppeteer can't handle.
+> **Note:** Playwright MCP is entirely optional. Without it, GRaDOS still works through its built-in waterfall (TDM → OA → Sci-Hub → Headless Patchright). Playwright MCP adds an LLM-driven safety net for the cases the built-in browser can't handle.
 
 ### Configuration Example: GRaDOS + mcp-local-rag + Playwright 🧩
 

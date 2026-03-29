@@ -43,7 +43,7 @@
         },
         "headlessBrowser": {
             "browser": "msedge",
-            "_comment_browser": "Options: 'msedge', 'chrome', 'firefox'. GRaDOS only probes paths for the configured browser type on the current OS (Windows/macOS/Linux).",
+            "_comment_browser": "Options: 'msedge', 'chrome'. Patchright requires a Chromium-based browser. GRaDOS probes paths for the configured browser type on the current OS (Windows/macOS/Linux).",
             "executablePath": "",
             "_comment_executablePath": "Optional absolute or PROJECT_ROOT-relative browser executable path override. Use this if GRaDOS cannot find the configured browser.",
             "interactiveCaptchaHelp": true

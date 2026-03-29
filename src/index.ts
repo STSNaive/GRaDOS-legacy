@@ -11,7 +11,7 @@ import * as dotenv from "dotenv";
 import * as fs from "fs";
 import * as path from "path";
 import * as cheerio from 'cheerio';
-import puppeteer from 'puppeteer-core';
+import { chromium } from 'patchright';
 import FormData from 'form-data';
 import { PDFParse } from 'pdf-parse';
 import { spawn } from 'node:child_process';
@@ -2633,6 +2633,10 @@ function normalizeHeadlessBrowser(browserValue: string): string {
     if (normalized === "auto" || normalized.length === 0) return "msedge";
     if (normalized === "edge") return "msedge";
     if (normalized === "google-chrome" || normalized === "chromium" || normalized === "chromium-browser") return "chrome";
+    if (normalized === "firefox") {
+        console.error("[Headless] Firefox is not supported by Patchright (Chromium-only). Falling back to msedge.");
+        return "msedge";
+    }
     return normalized;
 }
 
@@ -2652,12 +2656,6 @@ function getHeadlessBrowserCandidates(browser: string): string[] {
                 "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"
             ];
         }
-        if (browser === "firefox") {
-            return [
-                "C:\\Program Files\\Mozilla Firefox\\firefox.exe",
-                "C:\\Program Files (x86)\\Mozilla Firefox\\firefox.exe"
-            ];
-        }
     }
 
     if (process.platform === "darwin") {
@@ -2671,12 +2669,6 @@ function getHeadlessBrowserCandidates(browser: string): string[] {
             return [
                 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
                 path.join(homeDir, "Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
-            ];
-        }
-        if (browser === "firefox") {
-            return [
-                "/Applications/Firefox.app/Contents/MacOS/firefox",
-                path.join(homeDir, "Applications/Firefox.app/Contents/MacOS/firefox")
             ];
         }
     }
@@ -2697,12 +2689,6 @@ function getHeadlessBrowserCandidates(browser: string): string[] {
                 "/usr/bin/chromium-browser"
             ];
         }
-        if (browser === "firefox") {
-            return [
-                "/usr/bin/firefox",
-                "/snap/bin/firefox"
-            ];
-        }
     }
 
     return [];
@@ -2711,7 +2697,6 @@ function getHeadlessBrowserCandidates(browser: string): string[] {
 function getHeadlessBrowserPathNames(browser: string): string[] {
     if (browser === "msedge") return ["msedge", "msedge.exe", "microsoft-edge", "microsoft-edge-stable"];
     if (browser === "chrome") return ["chrome", "chrome.exe", "google-chrome", "google-chrome-stable", "chromium", "chromium-browser"];
-    if (browser === "firefox") return ["firefox", "firefox.exe"];
     return [];
 }
 
@@ -2781,9 +2766,7 @@ async function fetchFromHeadlessBrowser(doi: string, extractConfig: any): Promis
         ? "Edge"
         : browserStr === "chrome"
             ? "Chrome"
-            : browserStr === "firefox"
-                ? "Firefox"
-                : browserStr;
+            : browserStr;
 
     try {
         console.error(`Launching ${browserLabel} Headless for DOI: ${doi}...`);
@@ -2798,43 +2781,35 @@ async function fetchFromHeadlessBrowser(doi: string, extractConfig: any): Promis
                 { width: 1920, height: 1080 }
             ];
             const randomViewport = viewports[Math.floor(Math.random() * viewports.length)];
-            const browser = await puppeteer.launch({
+            const browser = await chromium.launch({
                 executablePath,
                 headless: isHeadless,
-                defaultViewport: randomViewport,
                 args: ['--disable-blink-features=AutomationControlled']
             });
             try {
-                const page = await browser.newPage();
+                const page = await browser.newPage({ viewport: randomViewport });
 
-                // Anti-detection: hide navigator.webdriver and fake plugins/chrome object
-                await page.evaluateOnNewDocument(() => {
-                    Object.defineProperty(navigator, 'webdriver', { get: () => false });
-                    Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-                    (window as any).chrome = { runtime: {} };
-                });
-
-                let foundCaptcha = false;
+                // Anti-detection is handled natively by Patchright (CDP leak patches, webdriver property, etc.)
 
                 // 1. Setup Interceptor to catch any downloaded PDF
-                page.on('response', async (response: any) => {
+                page.on('response', async (response) => {
                     const contentType = response.headers()['content-type'];
                     if (contentType && contentType.includes('application/pdf')) {
                         try {
-                            pdfBuffer = await response.buffer();
+                            pdfBuffer = Buffer.from(await response.body());
                             console.error(`   [${browserLabel}] Browser successfully intercepted PDF!`);
                         } catch(e){}
                     }
                 });
 
                 // 2. Try Publisher Page via DOI
-                await page.goto(`https://doi.org/${doi}`, { waitUntil: 'networkidle2', timeout: 30000 }).catch(()=>{});
-                
+                await page.goto(`https://doi.org/${doi}`, { waitUntil: 'networkidle', timeout: 30000 }).catch(()=>{});
+
                 const pageTitle = (await page.title()).toLowerCase();
                 const pageHtml = await page.content();
                 const isCloudflare = pageTitle.includes("just a moment") || pageTitle.includes("attention required") || pageHtml.includes('cf-browser');
                 const isCaptcha = pageHtml.includes('captcha') || pageHtml.includes('recaptcha');
-                
+
                 if (isHeadless && (isCloudflare || isCaptcha)) {
                     console.error(`   [${browserLabel}] Anti-Bot / CAPTCHA detected in Headless mode!`);
                     await browser.close();
@@ -2843,31 +2818,31 @@ async function fetchFromHeadlessBrowser(doi: string, extractConfig: any): Promis
 
                 // 3. Try to click generic "Download PDF" buttons on publisher page
                 if (!pdfBuffer) {
-                    const link = await page.$('a[href*="pdf"], a[title*="PDF"], a[class*="pdf"]').catch(()=>null);
+                    const link = await page.$('a[href*="pdf"], a[title*="PDF"], a[class*="pdf"]');
                     if (link) {
                         console.error(`   [${browserLabel}] Clicking generic PDF link on publisher page...`);
                         await Promise.all([
-                            page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(()=>{}),
+                            page.waitForNavigation({ waitUntil: 'networkidle', timeout: 15000 }).catch(()=>{}),
                             link.click().catch(()=>{})
                         ]);
                     }
                 }
-                
+
                 // 4. Try SciHub inside the browser as a robust fallback
                 if (!pdfBuffer) {
                     console.error(`   [${browserLabel}] Publisher PDF not found. Falling back to Browser Sci-Hub...`);
                     const mirrorFile = extractConfig?.sciHub?.mirrorUrlFile || "./scihub-mirrors.txt";
                     const activeMirror = await getWorkingSciHubMirror(mirrorFile, "https://sci-hub.ru", false);
                     await page.goto(`${activeMirror}/${doi}`, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
-                    
+
                     const shHtml = await page.content();
                     if (isHeadless && (shHtml.includes('cf-browser') || shHtml.includes('captcha'))) {
                          console.error(`   [${browserLabel}] Sci-Hub is also protected by Cloudflare!`);
                          await browser.close();
-                         return true; 
+                         return true;
                     }
-                    
-                    const iframeSrc = await page.$eval('iframe, embed[type="application/pdf"]', (el: any) => el.src).catch(() => null);
+
+                    const iframeSrc = await page.locator('iframe, embed[type="application/pdf"]').evaluate((el: any) => el.src).catch(() => null);
                     if (iframeSrc) {
                          const pdfUrl = iframeSrc.startsWith('//') ? 'https:' + iframeSrc : (iframeSrc.startsWith('/') ? activeMirror + iframeSrc : iframeSrc);
                          // Navigate directly to the PDF URL to trigger response interception
@@ -2882,7 +2857,7 @@ async function fetchFromHeadlessBrowser(doi: string, extractConfig: any): Promis
                 }
 
                 await browser.close();
-                return false; 
+                return false;
             } catch(e) {
                 try { await browser.close(); } catch(err){}
                 return false;
