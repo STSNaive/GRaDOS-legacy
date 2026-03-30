@@ -49,8 +49,10 @@
             "interactiveCaptchaHelp": true
         },
         "parsing": {
+            "markerWorkerDirectory": "./marker-worker",
+            "_comment_markerWorkerDirectory": "Optional Marker worker directory override. Point this to the marker-worker folder itself (the directory containing worker.py, install.sh/install.ps1, and local.env after installation), not to its parent directory. Relative paths resolve from PROJECT_ROOT.",
             "markerTimeout": 120000,
-            "_comment_markerTimeout": "Maximum time in milliseconds to wait for the local Marker worker process. The worker is resolved from the grados package installation directory, not from this config's directory (default: 120000).",
+            "_comment_markerTimeout": "Maximum time in milliseconds to wait for the local Marker worker process. If markerWorkerDirectory is set, GRaDOS uses it directly; otherwise it falls back to PROJECT_ROOT/marker-worker (if present) and then PACKAGE_ROOT/marker-worker (default: 120000).",
             "order": ["LlamaParse", "Marker", "Native"],
             "enabled": {
                 "LlamaParse": true,

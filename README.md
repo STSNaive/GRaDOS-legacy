@@ -168,7 +168,7 @@ Claude Code (`.claude/settings.json`):
   "mcpServers": {
     "grados": {
       "command": "npx",
-      "args": ["-y", "grados", "--config", "/path/to/grados-config.json"]
+      "args": ["-y", "grados", "--config", "/path/to/papers/grados-config.json"]
     }
   }
 }
@@ -179,7 +179,7 @@ Codex (`~/.codex/config.toml`):
 ```toml
 [mcp_servers.grados]
 command = "npx"
-args = ["-y", "grados", "--config", "/path/to/grados-config.json"]
+args = ["-y", "grados", "--config", "/path/to/papers/grados-config.json"]
 ```
 
 The same GRaDOS API surface is available whether the server is started via `npx`, source checkout, or bundled inside the Claude plugin. Installation method only changes how the stdio server is launched and where its config file lives.
@@ -188,9 +188,21 @@ The same GRaDOS API surface is available whether the server is started via `npx`
 
 Marker uses deep learning models to convert PDFs to Markdown with much better accuracy than the built-in parser (`pdf-parse`). It is the recommended parser for production use.
 
-> **Path behavior:** Marker is resolved from `marker-worker/` inside the grados package installation directory (`PACKAGE_ROOT`), not from `cwd` or the config directory. When installed via `npm install -g grados`, it is automatically found at the correct location.
+> **Path behavior:** If `extract.parsing.markerWorkerDirectory` is configured, GRaDOS uses it directly; otherwise it falls back to `PROJECT_ROOT/marker-worker` (if present) and then `PACKAGE_ROOT/marker-worker`. `markerWorkerDirectory` must point to the **`marker-worker` directory itself**, meaning the folder containing `worker.py`, `install.sh` / `install.ps1`, and `local.env`, not its parent directory.
 
 **Prerequisites:** Python 3.12 (required by `marker-pdf`). Optional: NVIDIA GPU + CUDA on Windows/Linux for acceleration.
+
+If you launch GRaDOS via `npx`, it is best to scaffold a stable project-local `marker-worker/` directory first and then point the config at it:
+
+```bash
+npx -y grados --config /path/to/papers/grados-config.json --init-marker
+```
+
+This creates `marker-worker/` next to `grados-config.json`. If your config lives at `/path/to/papers/grados-config.json`, the recommended final directory is:
+
+```text
+/path/to/papers/marker-worker
+```
 
 **Install (macOS/Linux):**
 
@@ -219,7 +231,7 @@ The install scripts will:
 
 By default, Marker auto-detects the best torch device. On macOS, this allows PyTorch to use MPS when available. CUDA remains an explicit opt-in path; if a CUDA attempt fails verification, the installer falls back to CPU compatibility so GRaDOS can still use Marker.
 
-> **local.env behavior:** GRaDOS reads `MARKER_PYTHON` from `marker-worker/local.env` first, then falls back to standard `.venv/` interpreter locations. This means both the bundled installer and manual setups can point GRaDOS at the correct Python environment without changing the main config file.
+> **local.env behavior:** GRaDOS first resolves the `marker-worker/` directory via `extract.parsing.markerWorkerDirectory` (or the default search order), then reads `MARKER_PYTHON` from that directory's `local.env` before falling back to standard `.venv/` interpreter locations.
 
 **Enable in config:** After installation, update `grados-config.json` to enable Marker:
 
@@ -227,6 +239,7 @@ By default, Marker auto-detects the best torch device. On macOS, this allows PyT
 {
   "extract": {
     "parsing": {
+      "markerWorkerDirectory": "./marker-worker",
       "markerTimeout": 120000,
       "order": ["Marker", "Native"],
       "enabled": {
@@ -270,9 +283,9 @@ claude mcp add local-rag -- npx -y mcp-local-rag
 
 # Codex (fully align the standalone server with GRaDOS localRag defaults)
 codex mcp add local-rag \
-  --env BASE_DIR=/absolute/path/to/markdown \
-  --env DB_PATH=/absolute/path/to/lancedb \
-  --env CACHE_DIR=/absolute/path/to/models \
+  --env BASE_DIR=/path/to/papers/markdown \
+  --env DB_PATH=/path/to/papers/lancedb \
+  --env CACHE_DIR=/path/to/papers/models \
   --env MODEL_NAME=Xenova/all-MiniLM-L6-v2 \
   -- npx -y mcp-local-rag
 ```
@@ -287,15 +300,15 @@ Or configure manually - Claude Code (`.claude/settings.json`):
     "grados": {
       "command": "npx",
       "args": ["-y", "grados"],
-      "cwd": "/path/to/project-or-config-directory"
+      "cwd": "/path/to/papers"
     },
     "local-rag": {
       "command": "npx",
       "args": ["-y", "mcp-local-rag"],
       "env": {
-        "BASE_DIR": "/absolute/path/to/markdown",
-        "DB_PATH": "/absolute/path/to/lancedb",
-        "CACHE_DIR": "/absolute/path/to/models",
+        "BASE_DIR": "/path/to/papers/markdown",
+        "DB_PATH": "/path/to/papers/lancedb",
+        "CACHE_DIR": "/path/to/papers/models",
         "MODEL_NAME": "Xenova/all-MiniLM-L6-v2"
       }
     }
@@ -309,12 +322,12 @@ Codex (`~/.codex/config.toml`):
 [mcp_servers.grados]
 command = "npx"
 args = ["-y", "grados"]
-cwd = "/path/to/project-or-config-directory"
+cwd = "/path/to/papers"
 
 [mcp_servers.local-rag]
 command = "npx"
 args = ["-y", "mcp-local-rag"]
-env = { BASE_DIR = "/absolute/path/to/markdown", DB_PATH = "/absolute/path/to/lancedb", CACHE_DIR = "/absolute/path/to/models", MODEL_NAME = "Xenova/all-MiniLM-L6-v2" }
+env = { BASE_DIR = "/path/to/papers/markdown", DB_PATH = "/path/to/papers/lancedb", CACHE_DIR = "/path/to/papers/models", MODEL_NAME = "Xenova/all-MiniLM-L6-v2" }
 ```
 
 > **Important:** `BASE_DIR` must point to the same absolute directory as `extract.papersDirectory` in `grados-config.json`. If `extract.papersDirectory` is relative, resolve it from `PROJECT_ROOT` first (usually the config file's directory). To keep direct `local-rag:*` calls and `grados:search_saved_papers` on the same semantic index, align `DB_PATH`, `CACHE_DIR`, and `MODEL_NAME` with `localRag.dbPath`, `localRag.cacheDir`, and `localRag.modelName`.
@@ -390,7 +403,7 @@ The `SKILL.md` workflow (Step 3b) automatically guides the agent to use Playwrig
 
 ### Configuration Example: GRaDOS + mcp-local-rag + Playwright 🧩
 
-If you want to wire up the most common end-to-end research workflow in one shot, configure these three MCP services together. This example assumes your config file lives at `D:/Projects/Papers/grados-config.json`, that `extract.papersDirectory` uses the default relative path `./markdown`, and that `localRag.dbPath` / `localRag.cacheDir` keep their default relative values `./lancedb` / `./models`. With those defaults, `mcp-local-rag` should point to the paths below.
+If you want to wire up the most common end-to-end research workflow in one shot, configure these three MCP services together. This example assumes your config file lives at `/path/to/papers/grados-config.json`, that `extract.papersDirectory` uses the default relative path `./markdown`, and that `localRag.dbPath` / `localRag.cacheDir` keep their default relative values `./lancedb` / `./models`. With those defaults, `mcp-local-rag` should point to the paths below.
 
 Claude Code (`.claude/settings.json`):
 
@@ -399,15 +412,15 @@ Claude Code (`.claude/settings.json`):
   "mcpServers": {
     "grados": {
       "command": "npx",
-      "args": ["-y", "grados", "--config", "D:/Projects/Papers/grados-config.json"]
+      "args": ["-y", "grados", "--config", "/path/to/papers/grados-config.json"]
     },
     "local-rag": {
       "command": "npx",
       "args": ["-y", "mcp-local-rag"],
       "env": {
-        "BASE_DIR": "D:/Projects/Papers/markdown",
-        "DB_PATH": "D:/Projects/Papers/lancedb",
-        "CACHE_DIR": "D:/Projects/Papers/models",
+        "BASE_DIR": "/path/to/papers/markdown",
+        "DB_PATH": "/path/to/papers/lancedb",
+        "CACHE_DIR": "/path/to/papers/models",
         "MODEL_NAME": "Xenova/all-MiniLM-L6-v2"
       }
     },
@@ -424,12 +437,12 @@ Codex (`~/.codex/config.toml`):
 ```toml
 [mcp_servers.grados]
 command = "npx"
-args = ["-y", "grados", "--config", "D:/Projects/Papers/grados-config.json"]
+args = ["-y", "grados", "--config", "/path/to/papers/grados-config.json"]
 
 [mcp_servers.local-rag]
 command = "npx"
 args = ["-y", "mcp-local-rag"]
-env = { BASE_DIR = "D:/Projects/Papers/markdown", DB_PATH = "D:/Projects/Papers/lancedb", CACHE_DIR = "D:/Projects/Papers/models", MODEL_NAME = "Xenova/all-MiniLM-L6-v2" }
+env = { BASE_DIR = "/path/to/papers/markdown", DB_PATH = "/path/to/papers/lancedb", CACHE_DIR = "/path/to/papers/models", MODEL_NAME = "Xenova/all-MiniLM-L6-v2" }
 
 [mcp_servers.playwright]
 command = "npx"
@@ -496,8 +509,8 @@ GRaDOS resolves paths in two separate scopes:
 
 | Scope | Resolved from | Examples |
 |---|---|---|
-| **Package assets** | npm install directory (`PACKAGE_ROOT`) | `marker-worker/` |
-| **Project files** | Config file's parent directory (`PROJECT_ROOT`) | `downloads/`, `markdown/`, `scihub-mirrors.txt` |
+| **Package assets** | npm install directory (`PACKAGE_ROOT`) | default fallback `marker-worker/` |
+| **Project files** | Config file's parent directory (`PROJECT_ROOT`) | `downloads/`, `markdown/`, `scihub-mirrors.txt`, optional `marker-worker/` |
 
 **Config file discovery** (in priority order):
 
@@ -511,10 +524,10 @@ The directory containing the resolved config file becomes `PROJECT_ROOT`. All re
 
 ```bash
 # Explicit config path (recommended for MCP client setup)
-grados --config D:/Projects/Papers/grados-config.json
+grados --config /path/to/papers/grados-config.json
 
 # Or via environment variable
-GRADOS_CONFIG_PATH=D:/Projects/Papers/grados-config.json grados
+GRADOS_CONFIG_PATH=/path/to/papers/grados-config.json grados
 ```
 
 Claude Code (`.claude/settings.json`) — using `--config` instead of `cwd`:
@@ -524,7 +537,7 @@ Claude Code (`.claude/settings.json`) — using `--config` instead of `cwd`:
   "mcpServers": {
     "grados": {
       "command": "npx",
-      "args": ["-y", "grados", "--config", "D:/Projects/Papers/grados-config.json"]
+      "args": ["-y", "grados", "--config", "/path/to/papers/grados-config.json"]
     }
   }
 }
@@ -536,7 +549,7 @@ Codex (`~/.codex/config.toml`) — using env var:
 [mcp_servers.grados]
 command = "npx"
 args = ["-y", "grados"]
-env = { GRADOS_CONFIG_PATH = "D:/Projects/Papers/grados-config.json" }
+env = { GRADOS_CONFIG_PATH = "/path/to/papers/grados-config.json" }
 ```
 
 If you want storage in a different directory, use absolute paths in config:
@@ -544,8 +557,8 @@ If you want storage in a different directory, use absolute paths in config:
 ```json
 {
   "extract": {
-    "downloadDirectory": "E:/academic-cache/downloads",
-    "papersDirectory": "E:/academic-cache/markdown"
+    "downloadDirectory": "/path/to/custom-storage/downloads",
+    "papersDirectory": "/path/to/custom-storage/markdown"
   }
 }
 ```

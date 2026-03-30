@@ -29,6 +29,18 @@ import {
 // In dist/index.js, __dirname is <install>/dist, so the package root is one level up.
 const PACKAGE_ROOT = path.resolve(__dirname, "..");
 
+// Resolve config file path: --config <path> > GRADOS_CONFIG_PATH env > cwd/grados-config.json
+function resolveConfigPath(): string {
+    const argIdx = process.argv.indexOf("--config");
+    if (argIdx !== -1 && process.argv[argIdx + 1]) {
+        return path.resolve(process.argv[argIdx + 1]);
+    }
+    if (process.env.GRADOS_CONFIG_PATH) {
+        return path.resolve(process.env.GRADOS_CONFIG_PATH);
+    }
+    return path.join(process.cwd(), "grados-config.json");
+}
+
 function readPackageVersion(): string {
     try {
         const packageJsonPath = path.join(PACKAGE_ROOT, "package.json");
@@ -99,15 +111,36 @@ function resolveMarkerPython(workerDir: string): string | null {
     return null;
 }
 
+function copyDirectoryRecursive(sourceDir: string, destinationDir: string, skipNames: Set<string>): void {
+    fs.mkdirSync(destinationDir, { recursive: true });
+
+    for (const entry of fs.readdirSync(sourceDir, { withFileTypes: true })) {
+        if (skipNames.has(entry.name)) continue;
+
+        const sourcePath = path.join(sourceDir, entry.name);
+        const destinationPath = path.join(destinationDir, entry.name);
+
+        if (entry.isDirectory()) {
+            copyDirectoryRecursive(sourcePath, destinationPath, skipNames);
+        } else if (entry.isFile()) {
+            fs.copyFileSync(sourcePath, destinationPath);
+        }
+    }
+}
+
 function handleCliFlags(): void {
     if (process.argv.includes("--version") || process.argv.includes("-v")) {
         console.log(GRADOS_VERSION);
         process.exit(0);
     }
 
+    const resolvedConfigPath = resolveConfigPath();
+    const projectRoot = path.dirname(resolvedConfigPath);
+    let handled = false;
+
     if (process.argv.includes("--init")) {
         const exampleSrc = path.join(PACKAGE_ROOT, "grados-config.example.json");
-        const destPath = path.join(process.cwd(), "grados-config.json");
+        const destPath = resolvedConfigPath;
 
         if (fs.existsSync(destPath)) {
             console.log("grados-config.json already exists in this directory. No changes made.");
@@ -115,10 +148,33 @@ function handleCliFlags(): void {
             console.error("Could not find grados-config.example.json in the package. Please create grados-config.json manually.");
             process.exitCode = 1;
         } else {
+            fs.mkdirSync(path.dirname(destPath), { recursive: true });
             fs.copyFileSync(exampleSrc, destPath);
-            console.log(`Created grados-config.json in ${process.cwd()}`);
+            console.log(`Created grados-config.json at ${destPath}`);
             console.log("Edit this file to add your API keys and configure GRaDOS.");
         }
+        handled = true;
+    }
+
+    if (process.argv.includes("--init-marker")) {
+        const markerSourceDir = path.join(PACKAGE_ROOT, "marker-worker");
+        const markerTargetDir = path.join(projectRoot, "marker-worker");
+        const skipNames = new Set([".cache", ".tools", ".venv", "local.env"]);
+
+        if (fs.existsSync(markerTargetDir)) {
+            console.log(`marker-worker already exists at ${markerTargetDir}. No changes made.`);
+        } else if (!fs.existsSync(markerSourceDir)) {
+            console.error("Could not find marker-worker in the package. Please copy it manually from the GRaDOS distribution.");
+            process.exitCode = 1;
+        } else {
+            copyDirectoryRecursive(markerSourceDir, markerTargetDir, skipNames);
+            console.log(`Created marker-worker scaffold at ${markerTargetDir}`);
+            console.log("Run the install script in that directory to provision Marker for this project.");
+        }
+        handled = true;
+    }
+
+    if (handled) {
         process.exit();
     }
 }
@@ -129,18 +185,6 @@ dotenv.config();
 
 // Apply a stealthy global User-Agent to evade basic 403 Forbidden blocks
 axios.defaults.headers.common['User-Agent'] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-
-// Resolve config file path: --config <path> > GRADOS_CONFIG_PATH env > cwd/grados-config.json
-function resolveConfigPath(): string {
-    const argIdx = process.argv.indexOf("--config");
-    if (argIdx !== -1 && process.argv[argIdx + 1]) {
-        return path.resolve(process.argv[argIdx + 1]);
-    }
-    if (process.env.GRADOS_CONFIG_PATH) {
-        return path.resolve(process.env.GRADOS_CONFIG_PATH);
-    }
-    return path.join(process.cwd(), "grados-config.json");
-}
 
 const CONFIG_PATH = resolveConfigPath();
 
@@ -1239,6 +1283,22 @@ function getPapersDirectory(): string {
 function getDownloadsDirectory(): string {
     const downloadDirectory = config?.extract?.downloadDirectory;
     return downloadDirectory ? path.resolve(PROJECT_ROOT, downloadDirectory) : path.join(PROJECT_ROOT, "downloads");
+}
+
+function resolveMarkerWorkerDirectory(): string {
+    const configuredWorkerDir = config?.extract?.parsing?.markerWorkerDirectory;
+    if (typeof configuredWorkerDir === "string" && configuredWorkerDir.trim().length > 0) {
+        return path.isAbsolute(configuredWorkerDir)
+            ? configuredWorkerDir
+            : path.resolve(PROJECT_ROOT, configuredWorkerDir);
+    }
+
+    const projectWorkerDir = path.join(PROJECT_ROOT, "marker-worker");
+    if (fs.existsSync(path.join(projectWorkerDir, "worker.py"))) {
+        return projectWorkerDir;
+    }
+
+    return path.resolve(PACKAGE_ROOT, "marker-worker");
 }
 
 function safeDoiFromDoi(doi: string): string {
@@ -3474,11 +3534,15 @@ async function parseWithLlamaParse(pdfBuffer: Buffer, fileName: string): Promise
 
 async function parseWithMarker(pdfBuffer: Buffer, fileName: string, timeoutMs: number = 120000): Promise<string | null> {
     try {
-        const workerDir = path.resolve(PACKAGE_ROOT, "marker-worker");
+        const workerDir = resolveMarkerWorkerDirectory();
         const pythonExec = resolveMarkerPython(workerDir);
         const workerPy = path.join(workerDir, "worker.py");
-        if (!pythonExec || !fs.existsSync(workerPy)) {
-            console.error(`   [Marker] Worker is not installed at ${workerDir}. Run the marker install script in marker-worker/.`);
+        if (!fs.existsSync(workerPy)) {
+            console.error(`   [Marker] Worker scaffold not found at ${workerDir}. Set extract.parsing.markerWorkerDirectory to the marker-worker folder itself, then run the install script there.`);
+            return null;
+        }
+        if (!pythonExec) {
+            console.error(`   [Marker] Worker found at ${workerDir}, but no local Python env is available. Run the install script in that marker-worker directory.`);
             return null;
         }
 
