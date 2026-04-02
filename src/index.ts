@@ -14,7 +14,8 @@ import * as cheerio from 'cheerio';
 import { chromium } from 'patchright';
 import FormData from 'form-data';
 import { PDFParse } from 'pdf-parse';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import * as os from 'node:os';
 import {
     runResumableSearch,
     type PaperMetadata,
@@ -23,6 +24,16 @@ import {
     type SearchSourcePage,
     type SearchSourceState
 } from "./resumable-search.js";
+import {
+    benchmarkLogLine,
+    classifyPdfContent,
+    detectBotChallenge,
+    extractElsevierMetadataSignal,
+    extractScienceDirectPdfCandidates,
+    parseScienceDirectIntermediateRedirect,
+    type FetchAttemptDiagnostic,
+    type FetchOutcome
+} from "./publisher-utils.js";
 
 // --- Path Resolution ---
 // PACKAGE_ROOT: where grados is installed (contains marker-worker/, grados-config.example.json, etc.)
@@ -128,6 +139,160 @@ function copyDirectoryRecursive(sourceDir: string, destinationDir: string, skipN
     }
 }
 
+function resolveProjectPathFrom(projectRoot: string, configuredPath: unknown, fallbackRelativePath: string): string {
+    if (typeof configuredPath === "string" && configuredPath.trim().length > 0) {
+        return path.isAbsolute(configuredPath)
+            ? configuredPath
+            : path.resolve(projectRoot, configuredPath);
+    }
+    return path.join(projectRoot, fallbackRelativePath);
+}
+
+function readConfigJsonSafe(configPath: string): any {
+    try {
+        if (fs.existsSync(configPath)) {
+            return JSON.parse(fs.readFileSync(configPath, "utf-8"));
+        }
+    } catch (error) {
+        console.error(`[GRaDOS] Failed to read config at ${configPath}:`, error);
+    }
+    return {};
+}
+
+interface ManagedBrowserPaths {
+    preferManagedBrowser: boolean;
+    autoInstallManagedBrowser: boolean;
+    usePersistentProfile: boolean;
+    managedDataDirectory: string;
+    managedBrowserDirectory: string;
+    profileDirectory: string;
+}
+
+function resolveManagedChildPath(projectRoot: string, baseDirectory: string, configuredPath: unknown, fallbackRelativePath: string): string {
+    if (typeof configuredPath === "string" && configuredPath.trim().length > 0) {
+        return path.isAbsolute(configuredPath)
+            ? configuredPath
+            : path.resolve(projectRoot, configuredPath);
+    }
+    return path.join(baseDirectory, fallbackRelativePath);
+}
+
+function getManagedBrowserPaths(projectRoot: string, headlessConf: any): ManagedBrowserPaths {
+    const managedDataDirectory = resolveProjectPathFrom(projectRoot, headlessConf?.managedDataDirectory, ".grados/browser");
+    const managedBrowserDirectory = resolveManagedChildPath(projectRoot, managedDataDirectory, headlessConf?.managedBrowserDirectory, path.join("browsers", "playwright"));
+    const profileDirectory = resolveManagedChildPath(projectRoot, managedDataDirectory, headlessConf?.profileDirectory, path.join("profiles", "chrome"));
+
+    return {
+        preferManagedBrowser: headlessConf?.preferManagedBrowser !== false,
+        autoInstallManagedBrowser: headlessConf?.autoInstallManagedBrowser !== false,
+        usePersistentProfile: headlessConf?.usePersistentProfile !== false,
+        managedDataDirectory,
+        managedBrowserDirectory,
+        profileDirectory
+    };
+}
+
+function getManagedChromiumExecutableSuffixes(): string[] {
+    if (process.platform === "darwin") {
+        return [
+            path.join("chrome-mac-arm64", "Google Chrome for Testing.app", "Contents", "MacOS", "Google Chrome for Testing"),
+            path.join("chrome-mac-x64", "Google Chrome for Testing.app", "Contents", "MacOS", "Google Chrome for Testing")
+        ];
+    }
+
+    if (process.platform === "win32") {
+        return [path.join("chrome-win64", "chrome.exe")];
+    }
+
+    return [
+        path.join("chrome-linux64", "chrome"),
+        path.join("chrome-linux", "chrome")
+    ];
+}
+
+function findManagedChromiumExecutable(managedBrowserDirectory: string): string | null {
+    if (!fs.existsSync(managedBrowserDirectory)) return null;
+
+    const revisions = fs.readdirSync(managedBrowserDirectory, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory() && entry.name.startsWith("chromium-"))
+        .map((entry) => path.join(managedBrowserDirectory, entry.name))
+        .sort((left, right) => right.localeCompare(left));
+
+    const suffixes = getManagedChromiumExecutableSuffixes();
+    for (const revisionDirectory of revisions) {
+        for (const suffix of suffixes) {
+            const candidate = path.join(revisionDirectory, suffix);
+            if (fs.existsSync(candidate)) {
+                return candidate;
+            }
+        }
+    }
+
+    return null;
+}
+
+function resolvePatchrightCliPath(): string | null {
+    const candidatePaths = [
+        path.join(PACKAGE_ROOT, "node_modules", "patchright", "cli.js"),
+        path.join(PACKAGE_ROOT, "..", "patchright", "cli.js")
+    ];
+
+    for (const candidatePath of candidatePaths) {
+        if (fs.existsSync(candidatePath)) {
+            return candidatePath;
+        }
+    }
+
+    return null;
+}
+
+function bootstrapManagedBrowser(projectRoot: string, headlessConf: any, reasonLabel: string): void {
+    const managed = getManagedBrowserPaths(projectRoot, headlessConf);
+    if (!managed.preferManagedBrowser || !managed.autoInstallManagedBrowser) return;
+
+    ensureDirectory(managed.managedDataDirectory);
+    fs.mkdirSync(managed.managedBrowserDirectory, { recursive: true });
+    if (managed.usePersistentProfile) {
+        fs.mkdirSync(managed.profileDirectory, { recursive: true });
+    }
+
+    const existingExecutable = findManagedChromiumExecutable(managed.managedBrowserDirectory);
+    if (existingExecutable) {
+        console.log(`[GRaDOS] Managed browser already available for ${reasonLabel}: ${existingExecutable}`);
+    } else {
+        const patchrightCliPath = resolvePatchrightCliPath();
+        if (!patchrightCliPath) {
+            console.warn("[GRaDOS] Could not locate Patchright CLI. Skipping managed browser bootstrap.");
+        } else {
+            console.log(`[GRaDOS] Bootstrapping a dedicated GRaDOS browser for ${reasonLabel}...`);
+            console.log(`[GRaDOS] Browser cache: ${managed.managedBrowserDirectory}`);
+            if (managed.usePersistentProfile) {
+                console.log(`[GRaDOS] Browser profile: ${managed.profileDirectory}`);
+            }
+
+            const install = spawnSync(process.execPath, [patchrightCliPath, "install", "chromium", "--no-shell"], {
+                cwd: projectRoot,
+                env: {
+                    ...process.env,
+                    PLAYWRIGHT_BROWSERS_PATH: managed.managedBrowserDirectory
+                },
+                stdio: "inherit"
+            });
+
+            if (install.status !== 0) {
+                console.warn("[GRaDOS] Managed browser bootstrap failed. GRaDOS will still fall back to any configured/system Chromium browser.");
+            } else {
+                const installedExecutable = findManagedChromiumExecutable(managed.managedBrowserDirectory);
+                if (installedExecutable) {
+                    console.log(`[GRaDOS] Managed browser ready: ${installedExecutable}`);
+                } else {
+                    console.warn("[GRaDOS] Browser install completed, but the managed executable could not be resolved yet.");
+                }
+            }
+        }
+    }
+}
+
 function handleCliFlags(): void {
     if (process.argv.includes("--version") || process.argv.includes("-v")) {
         console.log(GRADOS_VERSION);
@@ -136,6 +301,8 @@ function handleCliFlags(): void {
 
     const resolvedConfigPath = resolveConfigPath();
     const projectRoot = path.dirname(resolvedConfigPath);
+    const shouldPrepareBrowser = process.argv.includes("--prepare-browser");
+    const shouldSkipBrowserBootstrap = process.argv.includes("--skip-browser-bootstrap");
     let handled = false;
 
     if (process.argv.includes("--init")) {
@@ -171,6 +338,12 @@ function handleCliFlags(): void {
             console.log(`Created marker-worker scaffold at ${markerTargetDir}`);
             console.log("Run the install script in that directory to provision Marker for this project.");
         }
+        handled = true;
+    }
+
+    if ((process.argv.includes("--init") || shouldPrepareBrowser) && !shouldSkipBrowserBootstrap) {
+        const effectiveConfig = readConfigJsonSafe(resolvedConfigPath);
+        bootstrapManagedBrowser(projectRoot, effectiveConfig?.extract?.headlessBrowser || {}, process.argv.includes("--init") ? "--init" : "--prepare-browser");
         handled = true;
     }
 
@@ -220,6 +393,7 @@ if (!config.academicEtiquetteEmail || config.academicEtiquetteEmail === "admin@e
 // Helpers to get API keys (Config file overrides .env, which is the MCPB path)
 const getApiKey = (keyName: string) => config?.apiKeys?.[keyName] || process.env[keyName];
 const getEtiquetteEmail = () => config?.academicEtiquetteEmail || process.env.ACADEMIC_ETIQUETTE_EMAIL || "admin@example.com";
+const isDebugEnabled = () => config?.debug === true || config?.debug?.enabled === true;
 
 // Initialize Server
 const server = new Server(
@@ -2021,12 +2195,7 @@ function listSavedPaperIndex(): PaperIndexEntry[] {
 }
 
 function resolveProjectPath(configuredPath: unknown, fallbackRelativePath: string): string {
-    if (typeof configuredPath === "string" && configuredPath.trim().length > 0) {
-        return path.isAbsolute(configuredPath)
-            ? configuredPath
-            : path.resolve(PROJECT_ROOT, configuredPath);
-    }
-    return path.join(PROJECT_ROOT, fallbackRelativePath);
+    return resolveProjectPathFrom(PROJECT_ROOT, configuredPath, fallbackRelativePath);
 }
 
 function getLocalRagDbPath(): string {
@@ -2463,9 +2632,72 @@ interface FetchResult {
     source: string;
     text?: string;       // If the API directly returns raw text/markdown
     pdfBuffer?: Buffer;  // If the API returns a PDF
-    metadata?: Record<string, string | undefined>;
+    metadata?: Record<string, string | number | boolean | undefined>;
     assetHints?: PaperAssetHint[];
     accessStatus?: string;
+    outcome: FetchOutcome;
+    diagnostic?: FetchAttemptDiagnostic;
+}
+
+function withTiming(startedAt: number): number {
+    return Date.now() - startedAt;
+}
+
+function buildFetchDiagnostic(params: {
+    strategy: string;
+    source: string;
+    outcome: FetchOutcome;
+    startedAt: number;
+    challengeSeen?: boolean;
+    manualInterventionRequired?: boolean;
+    finalUrl?: string;
+    contentType?: string;
+    pagesObserved?: number;
+    failureReason?: string;
+}): FetchAttemptDiagnostic {
+    return {
+        strategy: params.strategy,
+        source: params.source,
+        outcome: params.outcome,
+        duration_ms: withTiming(params.startedAt),
+        challenge_seen: params.challengeSeen,
+        manual_intervention_required: params.manualInterventionRequired,
+        final_url: params.finalUrl,
+        content_type: params.contentType,
+        pages_observed: params.pagesObserved,
+        failure_reason: params.failureReason
+    };
+}
+
+function isResultFullText(result: FetchResult | null): boolean {
+    return Boolean(result?.text || result?.pdfBuffer);
+}
+
+function fallbackResultRank(result: FetchResult | null): number {
+    if (!result) return 0;
+    if (result.outcome === "metadata_only") return 3;
+    if (result.outcome === "publisher_html_instead_of_pdf") return 2;
+    if (result.outcome === "publisher_challenge" || result.outcome === "scihub_challenge") return 2;
+    if (result.outcome === "timed_out") return 1;
+    return 1;
+}
+
+function formatFetchDiagnosticsText(diagnostics: FetchAttemptDiagnostic[]): string {
+    if (diagnostics.length === 0) return "";
+
+    return diagnostics
+        .map((diagnostic) => {
+            const detailParts = [
+                `${diagnostic.strategy}/${diagnostic.source}`,
+                diagnostic.outcome,
+                `${diagnostic.duration_ms}ms`
+            ];
+            if (diagnostic.failure_reason) detailParts.push(diagnostic.failure_reason);
+            if (diagnostic.challenge_seen) detailParts.push("challenge");
+            if (diagnostic.manual_intervention_required) detailParts.push("manual-help");
+            return `- ${detailParts.join(" | ")}`;
+        })
+        .join('\n');
 }
 
 function buildElsevierMarkdown(params: {
@@ -2516,6 +2748,9 @@ function extractElsevierAssetHints(articlePayload: any, rawText: string): PaperA
 async function fetchFromElsevier(doi: string): Promise<FetchResult | null> {
     const apiKey = getApiKey("ELSEVIER_API_KEY");
     if (!apiKey) return null;
+    const startedAt = Date.now();
+    const strategy = "TDM";
+
     try {
         console.error(`Attempting Elsevier Article Retrieval API (view=FULL JSON) for DOI: ${doi}...`);
         const jsonRes = await axios.get(`https://api.elsevier.com/content/article/doi/${doi}`, {
@@ -2535,6 +2770,7 @@ async function fetchFromElsevier(doi: string): Promise<FetchResult | null> {
         if (markdown.length > 1000) {
             return {
                 source: "Elsevier Article Retrieval (view=FULL JSON)",
+                outcome: "native_full_text",
                 text: markdown,
                 metadata: {
                     title,
@@ -2546,7 +2782,14 @@ async function fetchFromElsevier(doi: string): Promise<FetchResult | null> {
                     extraction_status: jsonRes.headers["x-els-status"] || "OK"
                 },
                 assetHints: extractElsevierAssetHints(jsonRes.data, originalText),
-                accessStatus: jsonRes.headers["x-els-status"] || "OK"
+                accessStatus: jsonRes.headers["x-els-status"] || "OK",
+                diagnostic: buildFetchDiagnostic({
+                    strategy,
+                    source: "Elsevier Article Retrieval (view=FULL JSON)",
+                    outcome: "native_full_text",
+                    startedAt,
+                    contentType: String(jsonRes.headers["content-type"] || "application/json")
+                })
             };
         }
     } catch (e: any) {
@@ -2563,6 +2806,7 @@ async function fetchFromElsevier(doi: string): Promise<FetchResult | null> {
         if (markdown.length > 1000) {
             return {
                 source: "Elsevier Article Retrieval (text/plain)",
+                outcome: "native_full_text",
                 text: markdown,
                 metadata: {
                     doi,
@@ -2570,13 +2814,70 @@ async function fetchFromElsevier(doi: string): Promise<FetchResult | null> {
                     extraction_status: textRes.headers["x-els-status"] || "OK"
                 },
                 assetHints: extractElsevierAssetHintsFromText(rawText),
-                accessStatus: textRes.headers["x-els-status"] || "OK"
+                accessStatus: textRes.headers["x-els-status"] || "OK",
+                diagnostic: buildFetchDiagnostic({
+                    strategy,
+                    source: "Elsevier Article Retrieval (text/plain)",
+                    outcome: "native_full_text",
+                    startedAt,
+                    contentType: String(textRes.headers["content-type"] || "text/plain")
+                })
             };
         }
     } catch (e: any) {
         console.error(`Elsevier text/plain failed (${e.response?.status || e.message}).`);
     }
-    return null;
+
+    try {
+        console.error(`Attempting Elsevier Article Retrieval API (metadata/no-view) for DOI: ${doi}...`);
+        const metadataRes = await axios.get(`https://api.elsevier.com/content/article/doi/${doi}`, {
+            headers: {
+                "X-ELS-APIKey": apiKey,
+                "Accept": "application/json"
+            }
+        });
+
+        const signal = extractElsevierMetadataSignal(metadataRes.data, doi);
+        if (signal) {
+            return {
+                source: "Elsevier Article Retrieval (metadata only)",
+                outcome: "metadata_only",
+                metadata: {
+                    title: signal.title,
+                    doi: signal.doi,
+                    pii: signal.pii,
+                    eid: signal.eid,
+                    publisher: signal.publisher,
+                    openaccess: signal.openaccess,
+                    scidir: signal.scidir,
+                    extraction_status: metadataRes.headers["x-els-status"] || "OK"
+                },
+                accessStatus: metadataRes.headers["x-els-status"] || "OK",
+                diagnostic: buildFetchDiagnostic({
+                    strategy,
+                    source: "Elsevier Article Retrieval (metadata only)",
+                    outcome: "metadata_only",
+                    startedAt,
+                    contentType: String(metadataRes.headers["content-type"] || "application/json"),
+                    failureReason: "FULL and text/plain unavailable; retained metadata-only signal"
+                })
+            };
+        }
+    } catch (e: any) {
+        console.error(`Elsevier metadata/no-view failed (${e.response?.status || e.message}).`);
+    }
+
+    return {
+        source: "Elsevier Article Retrieval",
+        outcome: "no_result",
+        diagnostic: buildFetchDiagnostic({
+            strategy,
+            source: "Elsevier Article Retrieval",
+            outcome: "no_result",
+            startedAt,
+            failureReason: "No usable full-text or metadata signal"
+        })
+    };
 }
 
 function normalizeSpringerAbstractContent(value: any): string {
@@ -2977,6 +3278,8 @@ function pickSpringerRecordUrl(record: any, format: "html" | "pdf"): string | un
 }
 
 async function fetchFromSpringer(doi: string): Promise<FetchResult | null> {
+    const startedAt = Date.now();
+    const strategy = "TDM";
     const metaRecord = await fetchSpringerMetaRecord(doi);
     const oaApiKey = getApiKey("SPRINGER_OA_API_KEY");
     const title = metaRecord?.title;
@@ -3022,6 +3325,7 @@ async function fetchFromSpringer(doi: string): Promise<FetchResult | null> {
             if (jatsPayload && jatsPayload.markdown.length > 1000) {
                 return {
                     source: "Springer OA JATS",
+                    outcome: "native_full_text",
                     text: jatsPayload.markdown,
                     metadata: {
                         title: jatsPayload.title || title,
@@ -3031,7 +3335,13 @@ async function fetchFromSpringer(doi: string): Promise<FetchResult | null> {
                         extraction_status: "oa_jats_ok"
                     },
                     assetHints: dedupeAssetHints([...jatsPayload.assetHints, ...htmlAssetHints]),
-                    accessStatus: htmlAccessStatus || "oa_jats_ok"
+                    accessStatus: htmlAccessStatus || "oa_jats_ok",
+                    diagnostic: buildFetchDiagnostic({
+                        strategy,
+                        source: "Springer OA JATS",
+                        outcome: "native_full_text",
+                        startedAt
+                    })
                 };
             }
         } catch (error: any) {
@@ -3052,6 +3362,7 @@ async function fetchFromSpringer(doi: string): Promise<FetchResult | null> {
                 if (htmlMarkdown.length > 1000) {
                     return {
                         source: "Springer/Nature direct HTML",
+                        outcome: "native_full_text",
                         text: htmlMarkdown,
                         metadata: {
                             title,
@@ -3061,7 +3372,15 @@ async function fetchFromSpringer(doi: string): Promise<FetchResult | null> {
                             extraction_status: "direct_html_ok"
                         },
                         assetHints: htmlAssetHints,
-                        accessStatus: "direct_html_ok"
+                        accessStatus: "direct_html_ok",
+                        diagnostic: buildFetchDiagnostic({
+                            strategy,
+                            source: "Springer/Nature direct HTML",
+                            outcome: "native_full_text",
+                            startedAt,
+                            finalUrl: htmlResponse.finalUrl,
+                            contentType: "text/html"
+                        })
                     };
                 }
             }
@@ -3078,6 +3397,7 @@ async function fetchFromSpringer(doi: string): Promise<FetchResult | null> {
             if (pdfBuffer.length > 0) {
                 return {
                     source: "Springer/Nature direct PDF",
+                    outcome: "native_full_text",
                     pdfBuffer,
                     metadata: {
                         title,
@@ -3087,7 +3407,15 @@ async function fetchFromSpringer(doi: string): Promise<FetchResult | null> {
                         extraction_status: "direct_pdf_ok"
                     },
                     assetHints: htmlAssetHints,
-                    accessStatus: htmlAccessStatus || "direct_pdf_ok"
+                    accessStatus: htmlAccessStatus || "direct_pdf_ok",
+                    diagnostic: buildFetchDiagnostic({
+                        strategy,
+                        source: "Springer/Nature direct PDF",
+                        outcome: "native_full_text",
+                        startedAt,
+                        finalUrl: pdfResponse.finalUrl,
+                        contentType: String(pdfResponse.headers["content-type"] || "application/pdf")
+                    })
                 };
             }
         } catch (error: any) {
@@ -3095,12 +3423,24 @@ async function fetchFromSpringer(doi: string): Promise<FetchResult | null> {
         }
     }
 
-    return null;
+    return {
+        source: "Springer/Nature",
+        outcome: "no_result",
+        diagnostic: buildFetchDiagnostic({
+            strategy,
+            source: "Springer/Nature",
+            outcome: "no_result",
+            startedAt,
+            failureReason: "No usable HTML, JATS, or PDF result"
+        })
+    };
 }
 
 // --- Fetch Strategies (Phase 2 & 3) ---
 
 async function fetchFromOA(doi: string): Promise<FetchResult | null> {
+    const startedAt = Date.now();
+    const strategy = "OA";
     try {
         console.error(`Attempting Open Access (Unpaywall) for DOI: ${doi}...`);
         const etiquetteEmail = getEtiquetteEmail();
@@ -3119,7 +3459,24 @@ async function fetchFromOA(doi: string): Promise<FetchResult | null> {
             try {
                 console.error(`OA: Trying ${loc.host_type} PDF: ${loc.url_for_pdf}`);
                 const pdfRes = await axios.get(loc.url_for_pdf, { responseType: 'arraybuffer', timeout: 30000 });
-                return { source: "Unpaywall OA", pdfBuffer: Buffer.from(pdfRes.data) };
+                const pdfBuffer = Buffer.from(pdfRes.data);
+                const validation = classifyPdfContent(pdfBuffer, String(pdfRes.headers["content-type"] || ""));
+                if (validation.isPdf) {
+                    return {
+                        source: "Unpaywall OA",
+                        outcome: "native_full_text",
+                        pdfBuffer,
+                        diagnostic: buildFetchDiagnostic({
+                            strategy,
+                            source: "Unpaywall OA",
+                            outcome: "native_full_text",
+                            startedAt,
+                            finalUrl: loc.url_for_pdf,
+                            contentType: String(pdfRes.headers["content-type"] || "application/pdf")
+                        })
+                    };
+                }
+                console.error(`OA: Skipping non-PDF response (${validation.reason}) from ${loc.url_for_pdf}`);
             } catch (dlErr: any) {
                 console.error(`OA: Failed (${dlErr.response?.status || dlErr.message}), trying next location...`);
             }
@@ -3130,7 +3487,17 @@ async function fetchFromOA(doi: string): Promise<FetchResult | null> {
     } catch(e: any) {
         console.error(`OA fetch failed (${e.response?.status || e.message}).`);
     }
-    return null;
+    return {
+        source: "Unpaywall OA",
+        outcome: "no_result",
+        diagnostic: buildFetchDiagnostic({
+            strategy,
+            source: "Unpaywall OA",
+            outcome: "no_result",
+            startedAt,
+            failureReason: "No direct OA PDF location yielded a valid PDF"
+        })
+    };
 }
 
 async function getWorkingSciHubMirror(configMirrorStore: string, fallback: string, autoUpdate: boolean): Promise<string> {
@@ -3171,6 +3538,8 @@ async function getWorkingSciHubMirror(configMirrorStore: string, fallback: strin
 }
 
 async function fetchFromSciHub(doi: string, extractConfig: any): Promise<FetchResult | null> {
+    const startedAt = Date.now();
+    const strategy = "SciHub";
     try {
         const mirrorUrl = extractConfig?.sciHub?.fallbackMirror || "https://sci-hub.ru";
         const mirrorFile = extractConfig?.sciHub?.mirrorUrlFile || "./scihub-mirrors.txt";
@@ -3184,6 +3553,21 @@ async function fetchFromSciHub(doi: string, extractConfig: any): Promise<FetchRe
                  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             }
         });
+        if (detectBotChallenge("", String(res.data), `${activeMirror}/${doi}`)) {
+            return {
+                source: "Sci-Hub",
+                outcome: "scihub_challenge",
+                diagnostic: buildFetchDiagnostic({
+                    strategy,
+                    source: "Sci-Hub",
+                    outcome: "scihub_challenge",
+                    startedAt,
+                    challengeSeen: true,
+                    finalUrl: `${activeMirror}/${doi}`,
+                    failureReason: "Challenge page detected before PDF extraction"
+                })
+            };
+        }
         
         // Scrape the PDF iframe link using cheerio
         const html = res.data;
@@ -3215,24 +3599,63 @@ async function fetchFromSciHub(doi: string, extractConfig: any): Promise<FetchRe
             
             console.error(`Sci-Hub bypassed paywall! Downloading PDF from inner link: ${pdfUrl}`);
             const pdfRes = await axios.get(pdfUrl, { responseType: 'arraybuffer' });
-            return { source: "Sci-Hub", pdfBuffer: Buffer.from(pdfRes.data) };
+            const pdfBuffer = Buffer.from(pdfRes.data);
+            const validation = classifyPdfContent(pdfBuffer, String(pdfRes.headers["content-type"] || ""));
+            if (validation.isPdf) {
+                return {
+                    source: "Sci-Hub",
+                    outcome: "native_full_text",
+                    pdfBuffer,
+                    diagnostic: buildFetchDiagnostic({
+                        strategy,
+                        source: "Sci-Hub",
+                        outcome: "native_full_text",
+                        startedAt,
+                        finalUrl: pdfUrl,
+                        contentType: String(pdfRes.headers["content-type"] || "application/pdf")
+                    })
+                };
+            }
+            return {
+                source: "Sci-Hub",
+                outcome: "scihub_no_pdf",
+                diagnostic: buildFetchDiagnostic({
+                    strategy,
+                    source: "Sci-Hub",
+                    outcome: "scihub_no_pdf",
+                    startedAt,
+                    finalUrl: pdfUrl,
+                    contentType: String(pdfRes.headers["content-type"] || ""),
+                    failureReason: validation.reason
+                })
+            };
         } else {
              console.error(`Sci-Hub fetched page but couldn't find a PDF embed or link.`);
         }
     } catch(e: any) {
         console.error(`Sci-Hub fetch failed (${e.message}).`);
     }
-    return null;
+    return {
+        source: "Sci-Hub",
+        outcome: "scihub_no_pdf",
+        diagnostic: buildFetchDiagnostic({
+            strategy,
+            source: "Sci-Hub",
+            outcome: "scihub_no_pdf",
+            startedAt,
+            failureReason: "No Sci-Hub embed or valid PDF link found"
+        })
+    };
 }
 
 function normalizeHeadlessBrowser(browserValue: string): string {
     const normalized = browserValue.toLowerCase().trim();
-    if (normalized === "auto" || normalized.length === 0) return "msedge";
+    if (normalized === "auto" || normalized.length === 0) return "chrome";
     if (normalized === "edge") return "msedge";
     if (normalized === "google-chrome" || normalized === "chromium" || normalized === "chromium-browser") return "chrome";
     if (normalized === "firefox") {
-        console.error("[Headless] Firefox is not supported by Patchright (Chromium-only). Falling back to msedge.");
-        return "msedge";
+        console.error("[Headless] Firefox is not supported by Patchright (Chromium-only). Falling back to chrome.");
+        return "chrome";
     }
     return normalized;
 }
@@ -3318,16 +3741,44 @@ function findExecutableOnPath(binaryNames: string[]): string | null {
     return null;
 }
 
-function resolveHeadlessBrowserExecutable(headlessConf: any): { browser: string; executablePath: string } | null {
-    const configuredBrowser = normalizeHeadlessBrowser(String(headlessConf?.browser || "msedge"));
+interface ResolvedHeadlessBrowserExecutable {
+    browser: string;
+    executablePath: string;
+    source: "managed" | "configured" | "system";
+    profileDirectory?: string;
+    managedBrowserDirectory?: string;
+}
+
+function resolveHeadlessBrowserExecutable(headlessConf: any): ResolvedHeadlessBrowserExecutable | null {
+    const configuredBrowser = normalizeHeadlessBrowser(String(headlessConf?.browser || "chrome"));
     const configuredExecutablePath = headlessConf?.executablePath ? String(headlessConf.executablePath) : "";
+    const managed = getManagedBrowserPaths(PROJECT_ROOT, headlessConf);
+    const managedExecutable = managed.preferManagedBrowser
+        ? findManagedChromiumExecutable(managed.managedBrowserDirectory)
+        : null;
+
+    if (managedExecutable) {
+        return {
+            browser: "chrome",
+            executablePath: managedExecutable,
+            source: "managed",
+            profileDirectory: managed.usePersistentProfile ? managed.profileDirectory : undefined,
+            managedBrowserDirectory: managed.managedBrowserDirectory
+        };
+    }
 
     if (configuredExecutablePath) {
         const resolvedExplicitPath = path.isAbsolute(configuredExecutablePath)
             ? configuredExecutablePath
             : path.resolve(PROJECT_ROOT, configuredExecutablePath);
         if (fs.existsSync(resolvedExplicitPath)) {
-            return { browser: configuredBrowser, executablePath: resolvedExplicitPath };
+            return {
+                browser: configuredBrowser,
+                executablePath: resolvedExplicitPath,
+                source: "configured",
+                profileDirectory: configuredBrowser === "chrome" && managed.usePersistentProfile ? managed.profileDirectory : undefined,
+                managedBrowserDirectory: configuredBrowser === "chrome" ? managed.managedBrowserDirectory : undefined
+            };
         }
         console.error(`[Headless] Configured executablePath not found: ${resolvedExplicitPath}`);
     }
@@ -3335,41 +3786,470 @@ function resolveHeadlessBrowserExecutable(headlessConf: any): { browser: string;
     const candidatePaths = getHeadlessBrowserCandidates(configuredBrowser);
     for (const candidatePath of candidatePaths) {
         if (fs.existsSync(candidatePath)) {
-            return { browser: configuredBrowser, executablePath: candidatePath };
+            return {
+                browser: configuredBrowser,
+                executablePath: candidatePath,
+                source: "system",
+                profileDirectory: configuredBrowser === "chrome" && managed.usePersistentProfile ? managed.profileDirectory : undefined,
+                managedBrowserDirectory: configuredBrowser === "chrome" ? managed.managedBrowserDirectory : undefined
+            };
         }
     }
 
     const pathHit = findExecutableOnPath(getHeadlessBrowserPathNames(configuredBrowser));
     if (pathHit) {
-        return { browser: configuredBrowser, executablePath: pathHit };
+        return {
+            browser: configuredBrowser,
+            executablePath: pathHit,
+            source: "system",
+            profileDirectory: configuredBrowser === "chrome" && managed.usePersistentProfile ? managed.profileDirectory : undefined,
+            managedBrowserDirectory: configuredBrowser === "chrome" ? managed.managedBrowserDirectory : undefined
+        };
     }
 
     console.error(`[Headless] Could not resolve an executable for configured browser="${configuredBrowser}" on platform="${process.platform}".`);
+    if (managed.preferManagedBrowser) {
+        console.error(`[Headless] Expected managed browser directory: ${managed.managedBrowserDirectory}`);
+        console.error(`[Headless] Run 'grados --prepare-browser' (or 'grados --init') to bootstrap the dedicated GRaDOS browser.`);
+    }
     return null;
+}
+
+interface BrowserAutomationSession {
+    browser: any;
+    context: any;
+    rootPage: any;
+    transport: "pipe" | "cdp_port";
+    cleanup: () => Promise<void>;
+}
+
+interface ReusableBrowserWindowState {
+    session: BrowserAutomationSession;
+    browser: string;
+    browserLabel: string;
+    executablePath: string;
+    viewport: { width: number; height: number };
+    createdAt: number;
+    lastUsedAt: number;
+}
+
+let reusableBrowserWindow: ReusableBrowserWindowState | null = null;
+let reusableBrowserWindowHooksBound = false;
+
+function isReusableBrowserWindowAlive(): boolean {
+    if (!reusableBrowserWindow) return false;
+
+    const { session } = reusableBrowserWindow;
+    if (!session?.context || !session?.rootPage) return false;
+    if (session.browser && typeof session.browser.isConnected === "function" && !session.browser.isConnected()) return false;
+    if (typeof session.rootPage.isClosed === "function" && session.rootPage.isClosed()) return false;
+    return true;
+}
+
+async function destroyReusableBrowserWindow(): Promise<void> {
+    if (!reusableBrowserWindow) return;
+
+    const doomed = reusableBrowserWindow;
+    reusableBrowserWindow = null;
+    await doomed.session.cleanup().catch(() => {});
+}
+
+function bindReusableBrowserWindowCleanupHooks(): void {
+    if (reusableBrowserWindowHooksBound) return;
+    reusableBrowserWindowHooksBound = true;
+
+    process.once("exit", () => {
+        const doomed = reusableBrowserWindow;
+        reusableBrowserWindow = null;
+        if (!doomed) return;
+        try {
+            if (doomed.session.rootPage && !doomed.session.rootPage.isClosed?.()) {
+                doomed.session.rootPage.close().catch(() => {});
+            }
+            doomed.session.context?.close?.().catch(() => {});
+            doomed.session.browser?.close?.().catch(() => {});
+        } catch {
+            // Best effort only during process teardown.
+        }
+    });
+}
+
+async function ensureBrowserSessionRootPage(session: BrowserAutomationSession, viewport: { width: number; height: number }): Promise<any> {
+    if (session.rootPage && !session.rootPage.isClosed?.()) {
+        return session.rootPage;
+    }
+
+    session.rootPage = session.context.pages()[0] || await session.context.newPage();
+    await session.rootPage.setViewportSize?.(viewport).catch(() => {});
+    return session.rootPage;
+}
+
+async function closeSecondaryBrowserPages(context: any, rootPage: any): Promise<void> {
+    const pages = context.pages?.() || [];
+    for (const page of pages) {
+        if (page === rootPage) continue;
+        await page.close().catch(() => {});
+    }
+}
+
+function isEdgePipeLaunchFailure(browser: string, error: unknown): boolean {
+    if (process.platform !== "darwin" || browser !== "msedge") return false;
+    const message = error instanceof Error ? error.message : String(error);
+    return message.includes("Target page, context or browser has been closed")
+        || message.includes("browserType.launch");
+}
+
+async function getFreeLocalPort(): Promise<number> {
+    throw new Error("getFreeLocalPort is deprecated. Use DevToolsActivePort-based CDP discovery instead.");
+}
+
+async function waitForCdpEndpoint(port: number, child: any, timeoutMs = 15000): Promise<void> {
+    const startedAt = Date.now();
+    let lastError = "";
+
+    while ((Date.now() - startedAt) < timeoutMs) {
+        if (child && (child.exitCode !== null || child.signalCode !== null)) {
+            throw new Error(`Browser exited before CDP became ready${lastError ? ` (${lastError})` : ""}.`);
+        }
+
+        try {
+            const response = await axios.get(`http://127.0.0.1:${port}/json/version`, {
+                timeout: 1000,
+                validateStatus: (status) => status >= 200 && status < 500
+            });
+            if (response.status === 200) return;
+        } catch (e: any) {
+            lastError = e?.message || String(e);
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+
+    throw new Error(`Timed out waiting for CDP endpoint on port ${port}${lastError ? ` (${lastError})` : ""}.`);
+}
+
+async function waitForDevToolsActivePort(userDataDir: string, child: any, timeoutMs = 15000): Promise<number> {
+    const startedAt = Date.now();
+    const devToolsFile = path.join(userDataDir, "DevToolsActivePort");
+    let lastError = "";
+
+    while ((Date.now() - startedAt) < timeoutMs) {
+        if (child && (child.exitCode !== null || child.signalCode !== null)) {
+            throw new Error(`Browser exited before DevToolsActivePort became ready${lastError ? ` (${lastError})` : ""}.`);
+        }
+
+        try {
+            if (fs.existsSync(devToolsFile)) {
+                const content = fs.readFileSync(devToolsFile, "utf-8").trim();
+                const [firstLine] = content.split(/\r?\n/);
+                const port = Number(firstLine);
+                if (Number.isInteger(port) && port > 0) {
+                    return port;
+                }
+            }
+        } catch (e: any) {
+            lastError = e?.message || String(e);
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+
+    throw new Error(`Timed out waiting for DevToolsActivePort${lastError ? ` (${lastError})` : ""}.`);
+}
+
+async function terminateChildProcess(child: any): Promise<void> {
+    if (!child || child.exitCode !== null || child.signalCode !== null) return;
+
+    await new Promise<void>((resolve) => {
+        let settled = false;
+        const finish = () => {
+            if (settled) return;
+            settled = true;
+            resolve();
+        };
+
+        const forceKillTimer = setTimeout(() => {
+            try { child.kill("SIGKILL"); } catch {}
+            finish();
+        }, 1500);
+
+        child.once("exit", () => {
+            clearTimeout(forceKillTimer);
+            finish();
+        });
+
+        try {
+            child.kill("SIGTERM");
+        } catch {
+            clearTimeout(forceKillTimer);
+            finish();
+        }
+    });
+}
+
+async function launchChromiumSession(params: {
+    browser: string;
+    browserLabel: string;
+    executablePath: string;
+    isHeadless: boolean;
+    viewport: { width: number; height: number };
+    userDataDir?: string;
+    launchArgs?: string[];
+}): Promise<BrowserAutomationSession> {
+    const launchArgs = [
+        '--disable-blink-features=AutomationControlled',
+        ...(params.launchArgs || [])
+    ];
+
+    if (params.userDataDir) {
+        ensureDirectory(params.userDataDir);
+        const context = await chromium.launchPersistentContext(params.userDataDir, {
+            executablePath: params.executablePath,
+            headless: params.isHeadless,
+            args: launchArgs,
+            viewport: params.viewport,
+            acceptDownloads: true
+        });
+        const rootPage = context.pages()[0] || await context.newPage();
+        await rootPage.setViewportSize?.(params.viewport).catch(() => {});
+        return {
+            browser: context.browser?.() || null,
+            context,
+            rootPage,
+            transport: "pipe",
+            cleanup: async () => {
+                await context.close().catch(() => {});
+            }
+        };
+    }
+
+    try {
+        const browser = await chromium.launch({
+            executablePath: params.executablePath,
+            headless: params.isHeadless,
+            args: launchArgs
+        });
+        const context = await browser.newContext({
+            viewport: params.viewport,
+            acceptDownloads: true
+        });
+        const rootPage = await context.newPage();
+        return {
+            browser,
+            context,
+            rootPage,
+            transport: "pipe",
+            cleanup: async () => {
+                await context.close().catch(() => {});
+                await browser.close().catch(() => {});
+            }
+        };
+    } catch (launchError) {
+        if (!isEdgePipeLaunchFailure(params.browser, launchError)) {
+            throw launchError;
+        }
+
+        console.error(`   [${params.browserLabel}] Playwright pipe launch failed on macOS. Retrying via CDP port fallback...`);
+
+        const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "grados-edge-cdp-"));
+        const appBundlePath = params.executablePath.includes(".app/Contents/MacOS/")
+            ? params.executablePath.split("/Contents/MacOS/")[0]
+            : "";
+        const useOpenAppLauncher = process.platform === "darwin" && appBundlePath.length > 0;
+        const browserStdoutPath = path.join(userDataDir, "browser-stdout.log");
+        const browserStderrPath = path.join(userDataDir, "browser-stderr.log");
+        const childArgs = [
+            '--disable-blink-features=AutomationControlled',
+            '--no-first-run',
+            '--no-default-browser-check',
+            '--disable-search-engine-choice-screen',
+            '--disable-sync',
+            '--disable-dev-shm-usage',
+            '--password-store=basic',
+            '--use-mock-keychain',
+            '--no-sandbox',
+            '--remote-debugging-port=0',
+            `--user-data-dir=${userDataDir}`
+        ];
+
+        if (params.isHeadless) {
+            childArgs.push('--headless=new');
+        }
+
+        childArgs.push('about:blank');
+
+        const launcherCommand = useOpenAppLauncher ? "/usr/bin/open" : params.executablePath;
+        const launcherArgs = useOpenAppLauncher
+            ? [
+                '-n',
+                ...(params.isHeadless ? ['-g'] : []),
+                appBundlePath,
+                '--stdin',
+                '/dev/null',
+                '--stdout',
+                browserStdoutPath,
+                '--stderr',
+                browserStderrPath,
+                '--args',
+                ...childArgs
+            ]
+            : childArgs;
+
+        const child = spawn(launcherCommand, launcherArgs, {
+            stdio: ['ignore', 'pipe', 'pipe']
+        });
+
+        let recentBrowserLogs = "";
+        const appendLog = (chunk: Buffer | string) => {
+            recentBrowserLogs = `${recentBrowserLogs}${String(chunk)}`;
+            if (recentBrowserLogs.length > 4000) {
+                recentBrowserLogs = recentBrowserLogs.slice(-4000);
+            }
+        };
+
+        child.stdout?.on('data', appendLog);
+        child.stderr?.on('data', appendLog);
+
+        try {
+            const launcherProbe = useOpenAppLauncher ? null : child;
+            const port = await waitForDevToolsActivePort(userDataDir, launcherProbe);
+            await waitForCdpEndpoint(port, launcherProbe);
+            const browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
+
+            let context: any = null;
+            let ownsContext = false;
+            try {
+                context = await browser.newContext({
+                    viewport: params.viewport,
+                    acceptDownloads: true
+                });
+                ownsContext = true;
+            } catch {
+                context = browser.contexts()[0];
+                if (!context) {
+                    throw new Error("CDP fallback connected, but no browser context was available.");
+                }
+            }
+
+            const rootPage = context.pages()[0] || await context.newPage();
+            if (!ownsContext) {
+                await rootPage.setViewportSize(params.viewport).catch(() => {});
+            }
+
+            return {
+                browser,
+                context,
+                rootPage,
+                transport: "cdp_port",
+                cleanup: async () => {
+                    if (ownsContext) {
+                        await context.close().catch(() => {});
+                    }
+                    await browser.close().catch(() => {});
+                    await terminateChildProcess(child);
+                    fs.rmSync(userDataDir, { recursive: true, force: true });
+                }
+            };
+        } catch (cdpError: any) {
+            await terminateChildProcess(child);
+            if (useOpenAppLauncher) {
+                const fileLogs = [browserStdoutPath, browserStderrPath]
+                    .filter((filePath) => fs.existsSync(filePath))
+                    .map((filePath) => fs.readFileSync(filePath, "utf-8"))
+                    .join("\n");
+                if (fileLogs.trim()) {
+                    recentBrowserLogs = `${recentBrowserLogs}\n${fileLogs}`.trim();
+                    if (recentBrowserLogs.length > 4000) {
+                        recentBrowserLogs = recentBrowserLogs.slice(-4000);
+                    }
+                }
+            }
+            fs.rmSync(userDataDir, { recursive: true, force: true });
+            const detail = recentBrowserLogs.trim();
+            const message = cdpError?.message || String(cdpError);
+            throw new Error(detail ? `${message}\n${detail}` : message);
+        }
+    }
+}
+
+async function getOrCreateReusableBrowserWindow(params: {
+    browser: string;
+    browserLabel: string;
+    executablePath: string;
+    viewport: { width: number; height: number };
+    userDataDir?: string;
+}): Promise<BrowserAutomationSession> {
+    if (isReusableBrowserWindowAlive()) {
+        const activeWindow = reusableBrowserWindow!;
+        activeWindow.lastUsedAt = Date.now();
+        await ensureBrowserSessionRootPage(activeWindow.session, activeWindow.viewport);
+        return activeWindow.session;
+    }
+
+    await destroyReusableBrowserWindow();
+
+    const session = await launchChromiumSession({
+        browser: params.browser,
+        browserLabel: params.browserLabel,
+        executablePath: params.executablePath,
+        isHeadless: false,
+        viewport: params.viewport,
+        userDataDir: params.userDataDir,
+        launchArgs: ['--new-window']
+    });
+
+    reusableBrowserWindow = {
+        session,
+        browser: params.browser,
+        browserLabel: params.browserLabel,
+        executablePath: params.executablePath,
+        viewport: params.viewport,
+        createdAt: Date.now(),
+        lastUsedAt: Date.now()
+    };
+    bindReusableBrowserWindowCleanupHooks();
+    return session;
 }
 
 // --- Fetch Strategy (Phase 4: Headless Browser Fallback) ---
 async function fetchFromHeadlessBrowser(doi: string, extractConfig: any): Promise<FetchResult | null> {
+    const startedAt = Date.now();
+    const strategy = "Headless";
     const headlessConf = extractConfig?.headlessBrowser || {};
-    const interactiveCaptchaHelp = headlessConf.interactiveCaptchaHelp !== false;
+    const reuseInteractiveWindow = headlessConf.reuseInteractiveWindow !== false;
+    const keepInteractiveWindowOpen = headlessConf.keepInteractiveWindowOpen !== false;
+    const closePdfPageAfterCapture = headlessConf.closePdfPageAfterCapture !== false;
     const browserResolution = resolveHeadlessBrowserExecutable(headlessConf);
 
     if (!browserResolution) {
-        return null;
+        return {
+            source: "Headless Browser",
+            outcome: "no_result",
+            diagnostic: buildFetchDiagnostic({
+                strategy,
+                source: "Headless Browser",
+                outcome: "no_result",
+                startedAt,
+                failureReason: "No compatible browser executable found"
+            })
+        };
     }
 
-    const { browser: browserStr, executablePath } = browserResolution;
-    const browserLabel = browserStr === "msedge"
-        ? "Edge"
-        : browserStr === "chrome"
-            ? "Chrome"
-            : browserStr;
+    const { browser: browserStr, executablePath, profileDirectory, source: browserSource } = browserResolution;
+    const browserLabel = browserSource === "managed"
+        ? "GRaDOS Chrome"
+        : browserStr === "msedge"
+            ? "Edge"
+            : browserStr === "chrome"
+                ? "Chrome"
+                : browserStr;
+
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
     try {
-        console.error(`Launching ${browserLabel} Headless for DOI: ${doi}...`);
-        let pdfBuffer: Buffer | null = null;
+        console.error(`Launching ${browserLabel} browser session for DOI: ${doi}...`);
         
-        const launchAndAttempt = async (isHeadless: boolean): Promise<boolean> => {
+        const launchAndAttempt = async (): Promise<FetchResult> => {
             // Fingerprint randomization: vary viewport to reduce detection
             const viewports = [
                 { width: 1366, height: 768 },
@@ -3378,107 +4258,506 @@ async function fetchFromHeadlessBrowser(doi: string, extractConfig: any): Promis
                 { width: 1920, height: 1080 }
             ];
             const randomViewport = viewports[Math.floor(Math.random() * viewports.length)];
-            const browser = await chromium.launch({
-                executablePath,
-                headless: isHeadless,
-                args: ['--disable-blink-features=AutomationControlled']
-            });
+            let session: BrowserAutomationSession | null = null;
+            let retainWindow = false;
             try {
-                const page = await browser.newPage({ viewport: randomViewport });
+                retainWindow = reuseInteractiveWindow && keepInteractiveWindowOpen;
+                session = retainWindow
+                    ? await getOrCreateReusableBrowserWindow({
+                        browser: browserStr,
+                        browserLabel,
+                        executablePath,
+                        viewport: randomViewport,
+                        userDataDir: profileDirectory
+                    })
+                    : await launchChromiumSession({
+                        browser: browserStr,
+                        browserLabel,
+                        executablePath,
+                        isHeadless: false,
+                        viewport: randomViewport,
+                        userDataDir: profileDirectory,
+                        launchArgs: ['--new-window']
+                    });
+
+                const { context, transport } = session;
+                const rootPage = await ensureBrowserSessionRootPage(session, randomViewport);
+                if (transport === "cdp_port") {
+                    console.error(`   [${browserLabel}] Using CDP-port fallback transport.`);
+                }
+
+                if (retainWindow) {
+                    await closeSecondaryBrowserPages(context, rootPage);
+                    await rootPage.bringToFront().catch(() => {});
+                }
+
+                const trackedPages = new Set<any>();
+                const attemptedPdfUrls = new Set<string>();
+                const pageListeners = new Map<any, {
+                    popup: (popup: any) => void;
+                    response: (response: any) => Promise<void>;
+                    frameNavigated: (frame: any) => void;
+                }>();
+                const attemptedPageActions = new WeakMap<any, {
+                    dropdownClicked?: boolean;
+                    genericClicked?: boolean;
+                    scienceDirectViewPdfClicked?: boolean;
+                    scienceDirectPdfFlowDelegated?: boolean;
+                    scienceDirectModalDismissed?: boolean;
+                }>();
+                let pdfBuffer: Buffer | null = null;
+                let finalUrl = "";
+                let finalContentType = "";
+                let challengeSeen = false;
+                let manualInterventionRequired = false;
+                let pagesObserved = 0;
+                let failureReason = "publisher_no_pdf";
 
                 // Anti-detection is handled natively by Patchright (CDP leak patches, webdriver property, etc.)
-
-                // 1. Setup Interceptor to catch any downloaded PDF
-                page.on('response', async (response) => {
-                    const contentType = response.headers()['content-type'];
-                    if (contentType && contentType.includes('application/pdf')) {
-                        try {
-                            pdfBuffer = Buffer.from(await response.body());
-                            console.error(`   [${browserLabel}] Browser successfully intercepted PDF!`);
-                        } catch(e){}
+                const tryCaptureBuffer = (candidateBuffer: Buffer, contentType?: string, sourceUrl?: string): boolean => {
+                    const validation = classifyPdfContent(candidateBuffer, contentType);
+                    if (validation.isPdf) {
+                        pdfBuffer = candidateBuffer;
+                        finalUrl = sourceUrl || finalUrl;
+                        finalContentType = contentType || finalContentType || "application/pdf";
+                        failureReason = "publisher_pdf_obtained";
+                        return true;
                     }
-                });
 
-                // 2. Try Publisher Page via DOI
-                await page.goto(`https://doi.org/${doi}`, { waitUntil: 'networkidle', timeout: 30000 }).catch(()=>{});
+                    if (sourceUrl) {
+                        failureReason = validation.reason === "html_or_challenge_page"
+                            ? "publisher_html_instead_of_pdf"
+                            : validation.reason;
+                        finalUrl = sourceUrl;
+                        finalContentType = contentType || finalContentType;
+                    }
 
-                const pageTitle = (await page.title()).toLowerCase();
-                const pageHtml = await page.content();
-                const isCloudflare = pageTitle.includes("just a moment") || pageTitle.includes("attention required") || pageHtml.includes('cf-browser');
-                const isCaptcha = pageHtml.includes('captcha') || pageHtml.includes('recaptcha');
+                    return false;
+                };
 
-                if (isHeadless && (isCloudflare || isCaptcha)) {
-                    console.error(`   [${browserLabel}] Anti-Bot / CAPTCHA detected in Headless mode!`);
-                    await browser.close();
-                    return true; // Return true to request retry in visible mode
-                }
+                const inspectPageForChallenge = async (page: any): Promise<boolean> => {
+                    const pageTitle = await page.title().catch(() => "");
+                    const pageHtml = await page.content().catch(() => "");
+                    const pageUrl = page.url();
+                    const blocked = detectBotChallenge(pageTitle, pageHtml, pageUrl);
+                    if (blocked) {
+                        challengeSeen = true;
+                        failureReason = "publisher_challenge";
+                        finalUrl = pageUrl || finalUrl;
+                    }
+                    return blocked;
+                };
 
-                // 3. Try to click generic "Download PDF" buttons on publisher page
-                if (!pdfBuffer) {
-                    const link = await page.$('a[href*="pdf"], a[title*="PDF"], a[class*="pdf"]');
-                    if (link) {
-                        console.error(`   [${browserLabel}] Clicking generic PDF link on publisher page...`);
+                const dismissScienceDirectInterruptors = async (page: any): Promise<void> => {
+                    if (pdfBuffer || page.isClosed?.()) return;
+                    if (!page.url().includes("sciencedirect.com")) return;
+
+                    const actionState = attemptedPageActions.get(page) || {};
+                    if (actionState.scienceDirectModalDismissed) return;
+                    actionState.scienceDirectModalDismissed = true;
+                    attemptedPageActions.set(page, actionState);
+
+                    await page.keyboard?.press?.("Escape").catch(() => {});
+
+                    const closeButtons = [
+                        () => page.getByRole('button', { name: /close/i }).first(),
+                        () => page.getByRole('button', { name: /dismiss/i }).first(),
+                        () => page.getByRole('button', { name: /not now/i }).first(),
+                        () => page.locator('button[aria-label*="close" i]').first(),
+                        () => page.locator('[role="dialog"] button').first()
+                    ];
+
+                    for (const getLocator of closeButtons) {
+                        const locator = getLocator();
+                        const count = await locator.count().catch(() => 0);
+                        if (count <= 0) continue;
+                        await locator.click({ timeout: 1500 }).catch(() => {});
+                    }
+                };
+
+                const tryBackfillPdfFromPageUrl = async (page: any): Promise<void> => {
+                    if (pdfBuffer || page.isClosed?.()) return;
+
+                    const pageUrl = page.url();
+                    if (!/\.pdf(?:$|[?#])/i.test(pageUrl)) return;
+                    if (attemptedPdfUrls.has(pageUrl)) return;
+
+                    attemptedPdfUrls.add(pageUrl);
+                    finalUrl = pageUrl;
+
+                    try {
+                        const response = await context.request.get(pageUrl, { timeout: 20000 });
+                        const headers = response.headers();
+                        const contentType = String(headers["content-type"] || "");
+                        const body = Buffer.from(await response.body());
+                        if (tryCaptureBuffer(body, contentType, pageUrl)) {
+                            console.error(`   [${browserLabel}] Recovered a real PDF directly from the viewer tab URL.`);
+                        }
+                    } catch {
+                        // Ignore direct fetch failures; the normal response/download listeners may still succeed.
+                    }
+                };
+
+                const isScienceDirectArticleLandingPage = (pageUrl: string): boolean => {
+                    return /sciencedirect\.com\/science\/article\/pii\//i.test(pageUrl)
+                        && !/\/pdfft(?:[/?#]|$)/i.test(pageUrl);
+                };
+
+                const isScienceDirectPdfFlowPage = (pageUrl: string): boolean => {
+                    return /sciencedirect\.com\/science\/article\/pii\/.+\/pdfft/i.test(pageUrl)
+                        || /pdf\.sciencedirectassets\.com/i.test(pageUrl)
+                        || /craft\/capi\/cfts\/init/i.test(pageUrl);
+                };
+
+                const openScienceDirectCandidatePage = async (candidateUrl: string): Promise<void> => {
+                    if (pdfBuffer || attemptedPdfUrls.has(candidateUrl)) return;
+                    attemptedPdfUrls.add(candidateUrl);
+                    finalUrl = candidateUrl;
+
+                    const targetPage = await context.newPage();
+                    trackPage(targetPage);
+                    await targetPage.goto(candidateUrl, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+                };
+
+                const tryScienceDirectViewPdfClick = async (page: any): Promise<void> => {
+                    if (pdfBuffer || page.isClosed?.()) return;
+                    const pageUrl = page.url();
+                    if (!isScienceDirectArticleLandingPage(pageUrl)) return;
+                    if (await inspectPageForChallenge(page)) return;
+
+                    const actionState = attemptedPageActions.get(page) || {};
+                    if (actionState.scienceDirectViewPdfClicked) return;
+
+                    await dismissScienceDirectInterruptors(page);
+
+                    const roleLocator = page.getByRole('link', { name: /View PDF/i }).first();
+                    const hrefLocator = page.locator('a[href*="/pdfft"]').first();
+                    const roleCount = await roleLocator.count().catch(() => 0);
+                    const hrefCount = await hrefLocator.count().catch(() => 0);
+                    if (roleCount <= 0 && hrefCount <= 0) return;
+
+                    actionState.scienceDirectViewPdfClicked = true;
+                    attemptedPageActions.set(page, actionState);
+
+                    const locator = roleCount > 0 ? roleLocator : hrefLocator;
+                    const href = await locator.getAttribute('href').catch(() => null);
+                    const absoluteHref = href ? new URL(href, page.url()).toString() : null;
+                    const popupPromise = context.waitForEvent('page', { timeout: 4000 }).catch(() => null);
+
+                    try {
+                        await locator.click({ timeout: 5000 });
+                        const popup = await popupPromise;
+                        if (popup) {
+                            if (absoluteHref) {
+                                attemptedPdfUrls.add(absoluteHref);
+                            }
+                            actionState.scienceDirectPdfFlowDelegated = true;
+                            attemptedPageActions.set(page, actionState);
+                            trackPage(popup);
+                            await popup.waitForLoadState('domcontentloaded').catch(() => {});
+                            return;
+                        }
+                    } catch {
+                        // Fall through to direct new-tab navigation if the click path is intercepted.
+                    }
+
+                    if (absoluteHref) {
+                        actionState.scienceDirectPdfFlowDelegated = true;
+                        attemptedPageActions.set(page, actionState);
+                        await openScienceDirectCandidatePage(absoluteHref);
+                    }
+                };
+
+                const followScienceDirectCandidates = async (page: any): Promise<void> => {
+                    if (pdfBuffer || page.isClosed?.()) return;
+                    const pageUrl = page.url();
+                    if (!isScienceDirectArticleLandingPage(pageUrl)) return;
+                    if (await inspectPageForChallenge(page)) return;
+
+                    const actionState = attemptedPageActions.get(page) || {};
+                    if (actionState.scienceDirectPdfFlowDelegated) return;
+                    let html = await page.content().catch(() => "");
+                    let candidates = extractScienceDirectPdfCandidates(html, page.url());
+                    if (candidates.length === 0 && !actionState.dropdownClicked) {
+                        const dropdownTrigger = await page.$('#pdfLink');
+                        if (dropdownTrigger) {
+                            actionState.dropdownClicked = true;
+                            attemptedPageActions.set(page, actionState);
+                            await dropdownTrigger.click().catch(() => {});
+                            await sleep(750);
+                            html = await page.content().catch(() => html);
+                            candidates = extractScienceDirectPdfCandidates(html, page.url());
+                        }
+                    }
+
+                    for (const candidate of candidates) {
+                        if (pdfBuffer || attemptedPdfUrls.has(candidate.url)) continue;
+                        await openScienceDirectCandidatePage(candidate.url);
+                        if (pdfBuffer) return;
+                        const candidatePages = context.pages().filter((candidatePage: any) => candidatePage !== page);
+                        const latestCandidatePage = candidatePages[candidatePages.length - 1];
+                        if (!latestCandidatePage || latestCandidatePage.isClosed?.()) continue;
+                        if (await inspectPageForChallenge(latestCandidatePage)) continue;
+
+                        if (isScienceDirectPdfFlowPage(latestCandidatePage.url())) {
+                            continue;
+                        }
+
+                        const candidateHtml = await latestCandidatePage.content().catch(() => "");
+                        const redirectUrl = parseScienceDirectIntermediateRedirect(candidateHtml, latestCandidatePage.url());
+                        if (redirectUrl && !attemptedPdfUrls.has(redirectUrl)) {
+                            await openScienceDirectCandidatePage(redirectUrl);
+                            if (pdfBuffer) return;
+                            const redirectPages = context.pages().filter((candidatePage: any) => candidatePage !== page);
+                            const latestRedirectPage = redirectPages[redirectPages.length - 1];
+                            if (latestRedirectPage) {
+                                await inspectPageForChallenge(latestRedirectPage);
+                            }
+                        }
+                    }
+                };
+
+                const tryGenericPdfClick = async (page: any): Promise<void> => {
+                    if (pdfBuffer || page.isClosed?.()) return;
+                    if (page.url().includes("sciencedirect.com")) return;
+                    if (await inspectPageForChallenge(page)) return;
+
+                    const actionState = attemptedPageActions.get(page) || {};
+                    if (actionState.genericClicked) return;
+
+                    const genericLink = await page.$('a[href*="pdf"], a[title*="PDF"], a[class*="pdf"]');
+                    if (genericLink) {
+                        actionState.genericClicked = true;
+                        attemptedPageActions.set(page, actionState);
                         await Promise.all([
-                            page.waitForNavigation({ waitUntil: 'networkidle', timeout: 15000 }).catch(()=>{}),
-                            link.click().catch(()=>{})
+                            page.waitForLoadState('domcontentloaded').catch(() => {}),
+                            genericLink.click().catch(() => {})
                         ]);
                     }
-                }
+                };
 
-                // 4. Try SciHub inside the browser as a robust fallback
-                if (!pdfBuffer) {
-                    console.error(`   [${browserLabel}] Publisher PDF not found. Falling back to Browser Sci-Hub...`);
-                    const mirrorFile = extractConfig?.sciHub?.mirrorUrlFile || "./scihub-mirrors.txt";
-                    const activeMirror = await getWorkingSciHubMirror(mirrorFile, "https://sci-hub.ru", false);
-                    await page.goto(`${activeMirror}/${doi}`, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+                const trackPage = (page: any): void => {
+                    if (trackedPages.has(page)) return;
+                    trackedPages.add(page);
+                    pagesObserved += 1;
 
-                    const shHtml = await page.content();
-                    if (isHeadless && (shHtml.includes('cf-browser') || shHtml.includes('captcha'))) {
-                         console.error(`   [${browserLabel}] Sci-Hub is also protected by Cloudflare!`);
-                         await browser.close();
-                         return true;
+                    const handlePopup = (popup: any) => {
+                        trackPage(popup);
+                    };
+                    const handleResponse = async (response: any) => {
+                        const headers = response.headers();
+                        const contentType = String(headers['content-type'] || "");
+                        const contentDisposition = String(headers['content-disposition'] || "");
+                        const responseUrl = response.url();
+                        const looksPdfLike = contentType.includes('application/pdf')
+                            || responseUrl.toLowerCase().includes('/pdfft')
+                            || responseUrl.toLowerCase().includes('.pdf')
+                            || contentDisposition.toLowerCase().includes('.pdf');
+                        if (!looksPdfLike || pdfBuffer) return;
+
+                        try {
+                            const body = Buffer.from(await response.body());
+                            if (tryCaptureBuffer(body, contentType, responseUrl)) {
+                                console.error(`   [${browserLabel}] Browser captured a real PDF response.`);
+                            }
+                        } catch {
+                            // Ignore response bodies that cannot be read.
+                        }
+                    };
+                    const handleFrameNavigated = (frame: any) => {
+                        if (frame !== page.mainFrame()) return;
+                        const pageUrl = page.url();
+                        if (pageUrl && pageUrl !== "about:blank") {
+                            finalUrl = pageUrl;
+                        }
+                        if (/crasolve|challenge|captcha|capi\/cfts\/init/i.test(pageUrl)) {
+                            challengeSeen = true;
+                            failureReason = "publisher_challenge";
+                        }
+                    };
+
+                    page.on('popup', handlePopup);
+                    page.on('response', handleResponse);
+                    page.on('framenavigated', handleFrameNavigated);
+                    pageListeners.set(page, {
+                        popup: handlePopup,
+                        response: handleResponse,
+                        frameNavigated: handleFrameNavigated
+                    });
+                };
+
+                const handleContextPage = (page: any) => {
+                    trackPage(page);
+                };
+                context.on('page', handleContextPage);
+
+                const handleDownload = async (download: any) => {
+                    const downloadUrl = download.url?.() || "";
+                    const failure = await download.failure().catch(() => null);
+                    if (failure) {
+                        failureReason = failure;
+                        return;
                     }
 
-                    const iframeSrc = await page.locator('iframe, embed[type="application/pdf"]').evaluate((el: any) => el.src).catch(() => null);
-                    if (iframeSrc) {
-                         const pdfUrl = iframeSrc.startsWith('//') ? 'https:' + iframeSrc : (iframeSrc.startsWith('/') ? activeMirror + iframeSrc : iframeSrc);
-                         // Navigate directly to the PDF URL to trigger response interception
-                         await page.goto(pdfUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{});
+                    const downloadPath = await download.path().catch(() => null);
+                    if (!downloadPath || !fs.existsSync(downloadPath)) {
+                        failureReason = "download_path_unavailable";
+                        return;
                     }
+
+                    const body = fs.readFileSync(downloadPath);
+                    if (tryCaptureBuffer(body, "application/pdf", downloadUrl)) {
+                        console.error(`   [${browserLabel}] Browser completed a real PDF download.`);
+                    }
+                };
+                (context as any).on('download', handleDownload);
+
+                const tearDownAttempt = async (): Promise<void> => {
+                    for (const [page, listeners] of pageListeners.entries()) {
+                        page.off?.('popup', listeners.popup);
+                        page.off?.('response', listeners.response);
+                        page.off?.('framenavigated', listeners.frameNavigated);
+                    }
+                    pageListeners.clear();
+                    context.off?.('page', handleContextPage);
+                    (context as any).off?.('download', handleDownload);
+                };
+
+                trackPage(rootPage);
+
+                await rootPage.goto(`https://doi.org/${doi}`, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+                await rootPage.waitForLoadState('networkidle').catch(() => {});
+
+                const deadline = Date.now() + 120000;
+                let challengePromptShown = false;
+
+                while (Date.now() < deadline && !pdfBuffer) {
+                    let challengeActiveThisTick = false;
+
+                    for (const page of Array.from(trackedPages)) {
+                        if (pdfBuffer || page.isClosed?.()) continue;
+
+                        const blocked = await inspectPageForChallenge(page);
+                        challengeActiveThisTick = challengeActiveThisTick || blocked;
+                        if (blocked) continue;
+
+                        await tryBackfillPdfFromPageUrl(page);
+                        if (pdfBuffer) break;
+                        await tryScienceDirectViewPdfClick(page);
+                        if (pdfBuffer) break;
+                        await followScienceDirectCandidates(page);
+                        if (pdfBuffer) break;
+                        await tryGenericPdfClick(page);
+                        if (pdfBuffer) break;
+                        await tryBackfillPdfFromPageUrl(page);
+                    }
+
+                    if (challengeSeen && !challengePromptShown) {
+                        challengePromptShown = true;
+                        manualInterventionRequired = true;
+                        console.error(`   [${browserLabel}] Waiting for manual verification or a real PDF signal...`);
+                    }
+
+                    if (!challengeActiveThisTick && challengeSeen && !pdfBuffer && failureReason === "publisher_challenge") {
+                        failureReason = "challenge_cleared_but_pdf_not_yet_observed";
+                    }
+
+                    await sleep(1000);
                 }
 
-                if (!isHeadless && !pdfBuffer) {
-                    // Give user time to click the PDF themselves if we missed it
-                    console.error(`   [${browserLabel}] Waiting 20 seconds for you to manually trigger the PDF download...`);
-                    await new Promise(r => setTimeout(r, 20000));
+                if (pdfBuffer) {
+                    if (retainWindow && closePdfPageAfterCapture) {
+                        await closeSecondaryBrowserPages(context, rootPage);
+                    }
+                    await tearDownAttempt();
+                    if (!retainWindow) {
+                        await session.cleanup().catch(() => {});
+                    } else {
+                        await rootPage.bringToFront().catch(() => {});
+                        if (reusableBrowserWindow) reusableBrowserWindow.lastUsedAt = Date.now();
+                    }
+                    return {
+                        source: `Headless Browser (${browserLabel})`,
+                        outcome: "publisher_pdf_obtained",
+                        pdfBuffer,
+                        diagnostic: buildFetchDiagnostic({
+                            strategy,
+                            source: `Headless Browser (${browserLabel})`,
+                            outcome: "publisher_pdf_obtained",
+                            startedAt,
+                            challengeSeen,
+                            manualInterventionRequired,
+                            finalUrl: finalUrl || rootPage.url(),
+                            contentType: finalContentType || "application/pdf",
+                            pagesObserved
+                        })
+                    };
                 }
 
-                await browser.close();
-                return false;
+                await tearDownAttempt();
+                if (!retainWindow) {
+                    await session.cleanup().catch(() => {});
+                } else {
+                    await rootPage.bringToFront().catch(() => {});
+                    if (reusableBrowserWindow) reusableBrowserWindow.lastUsedAt = Date.now();
+                }
+
+                const outcome: FetchOutcome = failureReason === "publisher_html_instead_of_pdf"
+                    ? "publisher_html_instead_of_pdf"
+                    : challengeSeen
+                        ? "publisher_challenge"
+                        : "timed_out";
+
+                return {
+                    source: `Headless Browser (${browserLabel})`,
+                    outcome,
+                    diagnostic: buildFetchDiagnostic({
+                        strategy,
+                        source: `Headless Browser (${browserLabel})`,
+                        outcome,
+                        startedAt,
+                        challengeSeen,
+                        manualInterventionRequired,
+                        finalUrl: finalUrl || rootPage.url(),
+                        contentType: finalContentType,
+                        pagesObserved,
+                        failureReason
+                    })
+                };
             } catch(e) {
-                try { await browser.close(); } catch(err){}
-                return false;
+                if (session) {
+                    if (!retainWindow) {
+                        try { await session.cleanup(); } catch {}
+                    }
+                }
+                return {
+                    source: `Headless Browser (${browserLabel})`,
+                    outcome: "timed_out",
+                    diagnostic: buildFetchDiagnostic({
+                        strategy,
+                        source: `Headless Browser (${browserLabel})`,
+                        outcome: "timed_out",
+                        startedAt,
+                        failureReason: e instanceof Error ? e.message : String(e)
+                    })
+                };
             }
         };
-        
-        let needsInteractive = await launchAndAttempt(true);
-        
-        if (needsInteractive && interactiveCaptchaHelp) {
-            console.error("\n=======================================================");
-            console.error(">>> CAPTCHA DETECTED! OPENING VISIBLE BROWSER WINDOW <<<");
-            console.error(">>> PLEASE COMPLETE VERIFICATION IN THE POPUP WINDOW <<<");
-            console.error(">>> IT WILL AUTOMATICALLY RESUME AFTER SOLVING...    <<<");
-            console.error("=======================================================\n");
-            await launchAndAttempt(false);
-        }
-
-        if (pdfBuffer) {
-            return { source: `Headless Browser (${browserLabel})`, pdfBuffer };
-        }
+        return await launchAndAttempt();
     } catch(e: any) {
         console.error(`Headless Browser Exception: ${e.message}`);
     }
-    return null;
+    return {
+        source: `Headless Browser (${browserLabel})`,
+        outcome: "timed_out",
+        diagnostic: buildFetchDiagnostic({
+            strategy,
+            source: `Headless Browser (${browserLabel})`,
+            outcome: "timed_out",
+            startedAt,
+            failureReason: "Unhandled headless browser exception"
+        })
+    };
 }
 
 // --- Parsing Strategies (Phase 5) ---
@@ -3830,21 +5109,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         let successfulSource = "";
         let savedMarkdownPath = "";
         let savedPaperArtifacts: PaperSaveResult | null = null;
+        const fetchDiagnostics: FetchAttemptDiagnostic[] = [];
         
         // Define our waterfall strategies in config order
         const strategyFactories: Record<string, { name: string; run: () => Promise<FetchResult | null> }> = {
             TDM: {
                 name: "TDM",
                 run: async () => {
+                    let bestFallback: FetchResult | null = null;
                     for (const tdmName of tdmOrder) {
                         if (tdmEnabled[tdmName] === false) continue;
                         let res: FetchResult | null = null;
                         if (tdmName === "Elsevier") res = await fetchFromElsevier(doi);
                         if (tdmName === "Springer") res = await fetchFromSpringer(doi);
 
-                        if (res) return res;
+                        if (isResultFullText(res)) return res;
+                        if (fallbackResultRank(res) > fallbackResultRank(bestFallback)) {
+                            bestFallback = res;
+                        }
                     }
-                    return null;
+                    return bestFallback;
                 }
             },
             OA: {
@@ -3870,6 +5154,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             try {
                 const fetchRes = await strategy.run();
                 if (!fetchRes) continue;
+                if (fetchRes.diagnostic) {
+                    fetchDiagnostics.push(fetchRes.diagnostic);
+                    if (isDebugEnabled()) {
+                        console.error(`[Benchmark] ${benchmarkLogLine(doi, fetchRes.diagnostic)}`);
+                    }
+                }
 
                 let parsedMarkdown = "";
 
@@ -3880,10 +5170,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 } 
                 // Or do we have a PDF Buffer that needs Progressive Parsing?
                 else if (fetchRes.pdfBuffer) {
-                    // Validate that the buffer is actually a PDF (starts with %PDF magic bytes)
-                    const header = fetchRes.pdfBuffer.subarray(0, 5).toString('ascii');
-                    if (!header.startsWith('%PDF')) {
-                        console.error(`   [${strategy.name}] Downloaded content is not a valid PDF (header: "${header.replace(/[^\x20-\x7E]/g, '?')}"). Skipping.`);
+                    const validation = classifyPdfContent(
+                        fetchRes.pdfBuffer,
+                        fetchRes.diagnostic?.content_type || fetchRes.accessStatus
+                    );
+                    if (!validation.isPdf) {
+                        console.error(`   [${strategy.name}] Downloaded content is not a valid PDF (${validation.reason}). Skipping.`);
                         continue;
                     }
                     console.error(`   [${strategy.name}] procured PDF Buffer. Saving to disk...`);
@@ -3939,6 +5231,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                     if (!parsedMarkdown) {
                          throw new Error(`All configured Parsers failed to extract text from the downloaded PDF for DOI: ${doi}`);
                     }
+                } else if (fetchRes.outcome === "metadata_only") {
+                    console.error(`   [${strategy.name}] retained metadata-only signal and will continue down the waterfall.`);
+                    continue;
+                } else {
+                    console.error(`   [${strategy.name}] produced no full text (${fetchRes.outcome}); trying next strategy.`);
+                    continue;
                 }
 
                 // 3. Quality Assurance Validation (minCharacters is now the single source of truth)
@@ -3953,7 +5251,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                     try {
                         savedPaperArtifacts = await savePaperMarkdown({
                             doi,
-                            title: expectedTitle || fetchRes.metadata?.title,
+                            title: expectedTitle || (fetchRes.metadata?.title !== undefined ? String(fetchRes.metadata.title) : undefined),
                             source: fetchRes.source,
                             markdown: parsedMarkdown,
                             frontMatter: {
@@ -3961,7 +5259,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                                 pii: fetchRes.metadata?.pii,
                                 eid: fetchRes.metadata?.eid,
                                 openaccess: fetchRes.metadata?.openaccess,
-                                extraction_status: fetchRes.metadata?.extraction_status || fetchRes.accessStatus
+                                extraction_status: fetchRes.metadata?.extraction_status || fetchRes.accessStatus,
+                                fetch_outcome: fetchRes.outcome
                             },
                             assetHints: fetchRes.assetHints
                         });
@@ -3983,8 +5282,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         if (!finalExtractedText) {
+             const diagnosticsText = isDebugEnabled()
+                 ? formatFetchDiagnosticsText(fetchDiagnostics)
+                 : "";
              return {
-                 content: [{ type: "text", text: `Error: Failed to extract valid full text for DOI: ${doi} after exhausting all configured waterfall methods. The paywall might be too strong or the network is blocked.` }],
+                 content: [{
+                     type: "text",
+                     text: [
+                         `Error: Failed to extract valid full text for DOI: ${doi} after exhausting all configured waterfall methods.`,
+                         `The paywall might be too strong, the publisher may still require manual verification, or the network is blocked.`,
+                         diagnosticsText ? `Fetch benchmark:\n${diagnosticsText}` : ""
+                     ].filter(Boolean).join('\n\n')
+                 }],
                  isError: true
              };
         }

@@ -1,12 +1,12 @@
 {
   "name": "grados",
   "description": "Academic paper search and full-text extraction MCP server. Searches Crossref, PubMed, Scopus, Web of Science, Springer; extracts full text; parses PDFs; saves to Zotero.",
-  "version": "0.6.4",
+  "version": "0.6.5",
   "author": {
     "name": "STSNaive"
   },
-  "homepage": "https://github.com/STSNaive/GRaDOS",
-  "repository": "https://github.com/STSNaive/GRaDOS.git",
+  "homepage": "https://github.com/STSNaive/GRaDOS-legacy",
+  "repository": "https://github.com/STSNaive/GRaDOS-legacy.git",
   "license": "MIT",
   "keywords": [
     "academic",

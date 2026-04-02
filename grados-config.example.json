@@ -1,4 +1,6 @@
 {
+    "debug": false,
+    "_comment_debug": "Set to true to enable verbose benchmark logs and detailed extract failure diagnostics.",
     "search": {
         "order": [
             "Elsevier",
@@ -42,11 +44,30 @@
             "fallbackMirror": "https://sci-hub.se"
         },
         "headlessBrowser": {
-            "browser": "msedge",
-            "_comment_browser": "Options: 'msedge', 'chrome'. Patchright requires a Chromium-based browser. GRaDOS probes paths for the configured browser type on the current OS (Windows/macOS/Linux).",
+            "browser": "chrome",
+            "_comment_browser": "Fallback system browser type when GRaDOS cannot use its managed browser. Options: 'chrome', 'msedge'.",
+            "managedDataDirectory": "./.grados/browser",
+            "_comment_managedDataDirectory": "Root directory for GRaDOS-managed browser assets. Keep browser binaries and profiles here so the same layout can later move cleanly into OS-level app-data locations.",
+            "preferManagedBrowser": true,
+            "_comment_preferManagedBrowser": "If true, GRaDOS first looks for its own Playwright-managed Chrome for Testing installation before checking system Chrome/Edge paths.",
+            "managedBrowserDirectory": "",
+            "_comment_managedBrowserDirectory": "Optional explicit override for the managed browser cache directory. Leave empty to use managedDataDirectory + '/browsers/playwright'. Relative paths resolve from PROJECT_ROOT.",
+            "autoInstallManagedBrowser": true,
+            "_comment_autoInstallManagedBrowser": "If true, 'grados --init' and 'grados --prepare-browser' attempt a best-effort 'patchright install chromium --no-shell' into managedBrowserDirectory.",
+            "profileDirectory": "",
+            "_comment_profileDirectory": "Optional explicit override for the persistent GRaDOS Chrome profile. Leave empty to use managedDataDirectory + '/profiles/chrome'. Keeping this persistent reduces repeated publisher verification prompts across runs.",
+            "usePersistentProfile": true,
+            "_comment_usePersistentProfile": "If true, GRaDOS launches Chrome with profileDirectory as a persistent user-data-dir instead of using a throwaway in-memory context.",
             "executablePath": "",
-            "_comment_executablePath": "Optional absolute or PROJECT_ROOT-relative browser executable path override. Use this if GRaDOS cannot find the configured browser.",
-            "interactiveCaptchaHelp": true
+            "_comment_executablePath": "Optional absolute or PROJECT_ROOT-relative browser executable path override. This is used after the managed GRaDOS browser when preferManagedBrowser=true, so it behaves as a fallback/manual pin rather than overriding the managed runtime.",
+            "interactiveCaptchaHelp": true,
+            "_comment_interactiveCaptchaHelp": "Legacy compatibility flag. Visible browser mode is now the only browser-fetch mode, so this setting no longer changes whether a window opens.",
+            "reuseInteractiveWindow": true,
+            "_comment_reuseInteractiveWindow": "If true, keep reusing the same visible browser window/session for later publisher fetches so one verification can help subsequent DOI fetches.",
+            "keepInteractiveWindowOpen": true,
+            "_comment_keepInteractiveWindowOpen": "If true, do not close the visible browser window after a successful publisher fetch. GRaDOS will reuse it on later runs while the session stays alive.",
+            "closePdfPageAfterCapture": true,
+            "_comment_closePdfPageAfterCapture": "If true, close the spawned PDF tab/page after a real PDF is captured, while keeping the reusable browser window alive."
         },
         "parsing": {
             "markerWorkerDirectory": "./marker-worker",
